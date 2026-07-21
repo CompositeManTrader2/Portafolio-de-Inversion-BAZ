@@ -47,9 +47,13 @@ con redondeos, así que recomputarlos evita arrastrar esa pérdida de precisión
 Se consolidan de tres fuentes, sin duplicar:
 
 1. **Bitácora interna** — hoja `Coste` del mismo archivo.
-2. **Boletas del custodio** — formato `Res.NNNNNN`, que aportan comisión e IVA
-   reales.
+2. **Archivos de operaciones** — todo `.xlsx` en `data/` que no sea el de
+   posición, más los que se carguen desde el panel lateral. Se recorren todas
+   sus hojas. Las boletas del custodio aportan además comisión e IVA reales.
 3. **Captura manual** — desde la pestaña *Operaciones*.
+
+`data/` incluye las boletas del **16, 17, 20 y 21 de julio de 2026**, que
+cubren las 10 operaciones del periodo con sus costos reales.
 
 Una operación se identifica por `(emisora, sentido, títulos, precio)`. La fecha
 queda deliberadamente fuera de la llave porque la bitácora interna y la boleta

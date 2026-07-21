@@ -148,12 +148,21 @@ def archivo_por_defecto() -> Path | None:
     return candidatos[0]
 
 
-def boletas_por_defecto() -> list[Path]:
-    """Boletas del custodio incluidas en data/ (formato 'Res.NNNNNN')."""
+def boletas_por_defecto(posicion: Path | None = None) -> list[Path]:
+    """
+    Archivos de operaciones incluidos en data/: todo .xlsx que no sea el de
+    la posicion base.
+
+    No se filtra por nombre a proposito. El custodio entrega las boletas con
+    nomenclatura inconsistente ('2026.07.17.Res.104351...' y
+    '2026_07_21_Res_104351...' son el mismo formato), y un patron fijo dejaba
+    fuera archivos validos en silencio. Cualquier hoja sin operaciones legibles
+    simplemente aporta cero, asi que incluir de mas no hace dano.
+    """
     if not DATOS.exists():
         return []
     return [p for p in sorted(DATOS.glob("*.xlsx"))
-            if not p.name.startswith("~$") and ".res." in p.name.lower()]
+            if not p.name.startswith("~$") and p != posicion]
 
 
 def inicializar_estado() -> None:
@@ -195,10 +204,12 @@ def barra_lateral():
         contenido = subido.getvalue()
         sello = f"{subido.name}-{len(contenido)}"
         fuente_nombre = subido.name
+        ruta_posicion = None
     else:
         contenido = origen.read_bytes()
         sello = f"{origen.name}-{origen.stat().st_mtime}"
         fuente_nombre = origen.name
+        ruta_posicion = origen
 
     try:
         hojas = ld._abrir(contenido).sheet_names
@@ -262,7 +273,7 @@ def barra_lateral():
                 boletas=boletas, efectivo_inicial=efectivo_inicial,
                 comision_bps=comision_bps, tasa_iva=tasa_iva,
                 ventana=ventana, tasa_libre=tasa_libre,
-                fuente_nombre=fuente_nombre)
+                fuente_nombre=fuente_nombre, ruta_posicion=ruta_posicion)
 
 
 # ==========================================================================
@@ -756,13 +767,12 @@ def main() -> None:
         except Exception as e:
             st.sidebar.error(f"No se pudo leer {archivo.name}: {e}")
 
-    if not cfg["boletas"]:
-        for ruta in boletas_por_defecto():
-            try:
-                bloques.append(ld.leer_operaciones(
-                    ruta.read_bytes(), fuente=f"boleta {ruta.name[:24]}"))
-            except Exception:
-                pass
+    for ruta in boletas_por_defecto(cfg.get("ruta_posicion")):
+        try:
+            bloques.append(ld.leer_operaciones(
+                ruta.read_bytes(), fuente=f"boleta {ruta.stem[:14]}"))
+        except Exception:
+            pass
 
     if cfg["usar_coste"]:
         try:
