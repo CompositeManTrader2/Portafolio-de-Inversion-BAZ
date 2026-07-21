@@ -62,15 +62,45 @@ def descargar_historico(tickers: tuple[str, ...], dias: int = 400) -> pd.DataFra
         return pd.DataFrame()
 
     inicio = date.today() - timedelta(days=dias)
-    crudo = yf.download(
-        lista, start=inicio, auto_adjust=True, progress=False,
-        group_by="column", threads=True,
-    )
-    df = _normalizar_descarga(crudo, lista)
-    faltantes = [t for t in lista if t not in df.columns]
-    for t in faltantes:
-        df[t] = np.nan
-    return df[lista]
+    try:
+        crudo = yf.download(
+            lista, start=inicio, auto_adjust=True, progress=False,
+            group_by="column", threads=True,
+        )
+        df = _normalizar_descarga(crudo, lista)
+    except Exception:
+        df = pd.DataFrame()
+
+    # Igual que con los precios vigentes: lo que el lote no trajo se reintenta
+    # individualmente. Sin esto, un fallo de red se confunde con una emisora
+    # sin historico y la deja fuera del bloque de riesgo por el motivo
+    # equivocado.
+    for t in lista:
+        if t in df.columns and df[t].notna().sum() > 0:
+            continue
+        try:
+            s = yf.Ticker(t).history(start=inicio, auto_adjust=True)["Close"].dropna()
+        except Exception:
+            s = pd.Series(dtype=float)
+        if len(s):
+            s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+            df = df.reindex(df.index.union(s.index)) if len(df) else pd.DataFrame(index=s.index)
+            df[t] = s.reindex(df.index)
+        elif t not in df.columns:
+            df[t] = np.nan
+
+    return df[lista].sort_index()
+
+
+def _serie_individual(ticker: str) -> pd.Series:
+    """Cierres de un solo ticker, por si el lote lo dejo fuera."""
+    try:
+        s = yf.Ticker(ticker).history(period="5d")["Close"].dropna()
+        if len(s):
+            s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+        return s
+    except Exception:
+        return pd.Series(dtype=float)
 
 
 @_cache(ttl=TTL_INTRADIA, show_spinner=False)
@@ -78,27 +108,47 @@ def precios_vigentes(tickers: tuple[str, ...]) -> pd.DataFrame:
     """
     Ultimo precio y cierre previo por ticker.
 
-    Devuelve columnas: ticker, precio, cierre_previo, var_pct, fecha_precio.
+    Devuelve columnas: ticker, precio, cierre_previo, var_pct, fecha_precio,
+    reintentado.
+
     Se usa la serie diaria de 5 dias: el ultimo dato es el precio vigente
     (intradia si el mercado esta abierto) y el anterior es el cierre previo,
     que es la base correcta para el resultado del dia.
+
+    La descarga en lote de Yahoo suelta tickers de forma intermitente: la
+    emisora existe y cotiza, pero esa peticion en particular no la trajo.
+    Cuando pasa, se reintenta individualmente solo con las que faltaron, en
+    vez de darlas por no cotizadas y caer al precio de referencia del archivo,
+    que es un error silencioso y dificil de notar.
     """
     lista = [t for t in dict.fromkeys(tickers) if t]
     if not lista:
         return pd.DataFrame(columns=["ticker", "precio", "cierre_previo",
-                                     "var_pct", "fecha_precio"])
+                                     "var_pct", "fecha_precio", "reintentado"])
 
-    crudo = yf.download(lista, period="5d", interval="1d", auto_adjust=False,
-                        progress=False, group_by="column", threads=True)
-    cierres = _normalizar_descarga(crudo, lista)
+    try:
+        crudo = yf.download(lista, period="5d", interval="1d", auto_adjust=False,
+                            progress=False, group_by="column", threads=True)
+        cierres = _normalizar_descarga(crudo, lista)
+    except Exception:
+        cierres = pd.DataFrame()
 
     filas = []
     for t in lista:
-        serie = cierres[t].dropna() if t in cierres.columns else pd.Series(dtype=float)
+        serie = (cierres[t].dropna()
+                 if len(cierres) and t in cierres.columns
+                 else pd.Series(dtype=float))
+        reintentado = False
+        if not len(serie):
+            serie = _serie_individual(t)
+            reintentado = len(serie) > 0
+
         if not len(serie):
             filas.append(dict(ticker=t, precio=np.nan, cierre_previo=np.nan,
-                              var_pct=np.nan, fecha_precio=pd.NaT))
+                              var_pct=np.nan, fecha_precio=pd.NaT,
+                              reintentado=False))
             continue
+
         precio = float(serie.iloc[-1])
         previo = float(serie.iloc[-2]) if len(serie) > 1 else np.nan
         filas.append(dict(
@@ -108,6 +158,7 @@ def precios_vigentes(tickers: tuple[str, ...]) -> pd.DataFrame:
             var_pct=((precio / previo - 1.0) * 100.0
                      if previo and not np.isnan(previo) else np.nan),
             fecha_precio=serie.index[-1],
+            reintentado=reintentado,
         ))
     return pd.DataFrame(filas)
 

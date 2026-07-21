@@ -355,10 +355,18 @@ def pestana_posiciones(val):
     )
 
     if val["precio_estimado"].any():
-        faltan = ", ".join(val.loc[val["precio_estimado"], "emisora"].astype(str))
+        faltan = val.loc[val["precio_estimado"]]
+        detalle = ", ".join(
+            f"{r.emisora} ({r.ticker})" for r in faltan.itertuples())
         st.warning(
-            f"Sin precio vivo para: {faltan}. Se valuaron con el precio de "
-            f"referencia del archivo o, en su defecto, con el costo.")
+            f"**Sin precio vivo para {len(faltan)} posicion(es):** {detalle}. "
+            f"Se valuaron con el precio de referencia del archivo o, en su "
+            f"defecto, con el costo, y su resultado del dia se reporta en cero.\n\n"
+            f"Casi siempre es un fallo momentaneo de la descarga, no una emisora "
+            f"sin cotizar: Yahoo suelta tickers de forma intermitente cuando se "
+            f"piden 30 a la vez. Ya se reintenta cada uno por separado, asi que "
+            f"si el aviso persiste, pulsa **Actualizar precios** en el panel "
+            f"lateral; si aun asi sigue, revisa el ticker en la taxonomia.")
 
     st.download_button(
         "Descargar posiciones (CSV)",
