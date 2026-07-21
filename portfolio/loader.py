@@ -324,15 +324,36 @@ def leer_movimientos(origen, hoja: str | None = None,
     return pd.DataFrame(filas)[COLUMNAS_MOV]
 
 
-def leer_boleta_custodio(origen, fuente: str | None = None) -> pd.DataFrame:
+def leer_operaciones(origen, fuente: str | None = None) -> pd.DataFrame:
     """
-    Lee una boleta/estado del custodio (formato 'Res.NNNNNN'), que trae
-    comision e IVA reales por operacion. Reutiliza el lector generico porque
-    el encabezado ya incluye 'Emisora' y 'Precio'.
+    Lee un archivo de operaciones de cualquier procedencia: una boleta del
+    custodio (formato 'Res.NNNNNN'), un reporte de la mesa o una bitacora
+    capturada a mano.
+
+    Se recorren TODAS las hojas y se acumula lo que cada una aporte. Limitarse
+    a la primera hoja hacia que un archivo con portada o indice delante de los
+    datos devolviera cero operaciones sin avisar, que es peor que fallar: el
+    usuario cree que cargo sus movimientos y no cargo nada.
     """
     xls = _abrir(origen)
-    return leer_movimientos(origen, hoja=xls.sheet_names[0],
-                            fuente=fuente or "boleta custodio")
+    etiqueta = fuente or "archivo de operaciones"
+
+    bloques = []
+    for hoja in xls.sheet_names:
+        try:
+            parcial = leer_movimientos(origen, hoja=hoja, fuente=etiqueta)
+        except Exception:
+            continue
+        if len(parcial):
+            bloques.append(parcial)
+
+    if not bloques:
+        return _mov_vacio()
+    return pd.concat(bloques, ignore_index=True)
+
+
+# Nombre previo, conservado para no romper llamadas existentes.
+leer_boleta_custodio = leer_operaciones
 
 
 def consolidar_movimientos(*bloques: pd.DataFrame) -> pd.DataFrame:

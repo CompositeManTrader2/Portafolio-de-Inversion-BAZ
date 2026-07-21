@@ -221,10 +221,14 @@ def barra_lateral():
         hoja_mov = None if elegida == "(automatico)" else elegida
 
     boletas = st.sidebar.file_uploader(
-        "Boletas del custodio (.xlsx)", type=["xlsx", "xlsm"],
+        "Archivos de operaciones (.xlsx)", type=["xlsx", "xlsm"],
         accept_multiple_files=True,
-        help="Formato Res.NNNNNN. Aportan comision e IVA reales y se "
-             "concilian contra la bitacora sin duplicar operaciones.")
+        help="Boletas del custodio (Res.NNNNNN), reportes de la mesa o "
+             "bitacoras propias. Se pueden cargar varios a la vez. Se leen "
+             "todas las hojas del archivo y basta con que tengan Fecha, "
+             "Operacion, Emisora, Titulos y Precio. Las boletas aportan ademas "
+             "comision e IVA reales. Todo se concilia contra lo ya cargado sin "
+             "duplicar operaciones.")
 
     st.sidebar.markdown("### Efectivo y costos")
     efectivo_inicial = st.sidebar.number_input(
@@ -739,20 +743,23 @@ def main() -> None:
         st.error(f"No fue posible leer la posicion base: {e}")
         st.stop()
 
-    # Las boletas van primero: aportan comision e IVA reales y, al conciliar,
-    # esos valores prevalecen sobre la estimacion por tarifa.
+    # Los archivos cargados van primero: aportan comision e IVA reales y, al
+    # conciliar, esos valores prevalecen sobre la estimacion por tarifa.
     bloques = []
+    cargados: list[tuple[str, int]] = []
     for archivo in (cfg["boletas"] or []):
         try:
-            bloques.append(ld.leer_boleta_custodio(archivo.getvalue(),
-                                                   fuente=f"boleta {archivo.name}"))
+            leidas = ld.leer_operaciones(archivo.getvalue(),
+                                         fuente=f"archivo {archivo.name}")
+            bloques.append(leidas)
+            cargados.append((archivo.name, len(leidas)))
         except Exception as e:
-            st.sidebar.warning(f"No se pudo leer {archivo.name}: {e}")
+            st.sidebar.error(f"No se pudo leer {archivo.name}: {e}")
 
     if not cfg["boletas"]:
         for ruta in boletas_por_defecto():
             try:
-                bloques.append(ld.leer_boleta_custodio(
+                bloques.append(ld.leer_operaciones(
                     ruta.read_bytes(), fuente=f"boleta {ruta.name[:24]}"))
             except Exception:
                 pass
@@ -765,6 +772,16 @@ def main() -> None:
 
     if len(st.session_state.manuales):
         bloques.append(st.session_state.manuales)
+
+    # Un archivo que no aporta nada se reporta: un cero silencioso se lee como
+    # "ya quedo cargado" cuando en realidad no se leyo ninguna operacion.
+    for nombre, n in cargados:
+        if n:
+            st.sidebar.success(f"{nombre}: {n} operaciones leidas.")
+        else:
+            st.sidebar.warning(
+                f"{nombre}: no se encontraron operaciones. Revisa que alguna "
+                f"hoja tenga las columnas Operacion, Emisora, Titulos y Precio.")
 
     movimientos = ld.consolidar_movimientos(*bloques)
 
