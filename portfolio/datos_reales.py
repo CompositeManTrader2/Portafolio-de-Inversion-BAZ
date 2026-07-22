@@ -637,6 +637,9 @@ def inyectar(html: str, d: dict) -> str:
     html = _sub_re(html, r"const hallazgos = \[.*?\];",
                    f"const hallazgos = {js(_hallazgos(d))};")
 
+    # --- 7a. pestana de rotacion sectorial --------------------------------
+    html = _seccion_rotacion(html, _rotacion(d))
+
     # --- 7b. riesgo explicativo (antes de la capa interactiva) ------------
     html = _riesgo_explicativo(html)
 
@@ -1091,6 +1094,371 @@ def _riesgo_explicativo(html: str) -> str:
                              count=1)
     assert cuantos == 1, "No se encontro la grafica de drawdown"
     return nuevo
+
+
+# --------------------------------------------------------------------------
+# Rotacion sectorial y sugerencias de ponderacion
+# --------------------------------------------------------------------------
+# Mapa de rotacion al estilo RRG simplificado: eje X = fuerza relativa del
+# sector contra el IPC a 3 meses; eje Y = fuerza relativa a 1 mes. Cuatro
+# cuadrantes: Lider (+/+), Debilitandose (+/-), Rezagado (-/-) y Mejorando
+# (-/+). Las sugerencias de ponderacion salen de reglas transparentes que
+# cruzan el cuadrante con el peso activo (portafolio - benchmark), la
+# seleccion de Brinson a 3 meses y el consumo de riesgo; son un insumo de
+# analisis, no una recomendacion de inversion, y la pestana lo declara.
+
+_ABREV_SECTOR = {
+    "Consumo Básico": "C. Básico", "Consumo Discrecional": "C. Discr.",
+    "Índice Amplio": "Í. Amplio", "Telecomunicaciones": "Telecom",
+    "Inmobiliario": "Inmob.", "Industriales": "Industr.",
+    "Financiero": "Financ.", "Materiales": "Mater.",
+    "Tecnología": "Tecnol.", "Liquidez": "Liquidez", "Salud": "Salud",
+}
+
+_CUADRANTE_COLOR = {
+    "Líder": "var(--pos)", "Mejorando": "var(--brand-lite)",
+    "Debilitándose": "var(--warn)", "Rezagado": "var(--neg)",
+}
+_SUGERENCIA_COLOR = {
+    "Aumentar": "var(--pos)", "Acumular": "var(--brand-lite)",
+    "Vigilar": "var(--warn)", "Reducir": "var(--neg)",
+    "Revisar selección": "var(--warn)", "Mantener": "var(--ink3)",
+}
+
+
+def _rend_sector_portafolio(historico, val, sector_ascii: str,
+                            ses: int) -> float | None:
+    """Rendimiento del sector ponderado por valor con las emisoras propias."""
+    sub = val[val["sector"] == sector_ascii]
+    piezas = []
+    for _, r_ in sub.iterrows():
+        rr = bmk.rendimiento_periodo(historico, r_["ticker"], ses)
+        if rr is not None:
+            piezas.append((float(r_["valor_mercado"]), rr))
+    if not piezas:
+        return None
+    total = sum(w for w, _ in piezas)
+    return sum(w * rr for w, rr in piezas) / total
+
+
+def _rotacion(d: dict) -> dict:
+    historico, bench_df, val = d["historico"], d["bench_df"], d["val"]
+    ventanas = {"1m": 21, "3m": 63, "6m": 126}
+
+    ipc = {k: bmk.rendimiento_periodo(historico, BENCHMARK_TICKER, s)
+           for k, s in ventanas.items()}
+    # Todo en nombres UI (con acento): el CSV del benchmark y la taxonomia
+    # interna van en ASCII y sin mapear duplicaban sectores.
+    bench_sec = {k: {_ui(SECTOR_UI, f_.sector): f_.rendimiento_pct / 100.0
+                     for f_ in bmk.sectores_benchmark(
+                         bench_df, historico, s).itertuples()}
+                 for k, s in ventanas.items()}
+
+    w_p_raw = (val.groupby("sector")["valor_mercado"].sum()
+               / val["valor_mercado"].sum() * 100.0)
+    w_p = {_ui(SECTOR_UI, k): float(v) for k, v in w_p_raw.items()}
+    w_b = {_ui(SECTOR_UI, k): float(v) for k, v in
+           bench_df.groupby("sector")["peso_pct"].sum().items()}
+    ascii_de = {_ui(SECTOR_UI, k): k for k in w_p_raw.index}
+
+    # seleccion Brinson a 3 meses por sector
+    bs63 = bmk.sectores_benchmark(bench_df, historico, 63)
+    bf63 = an.brinson_fachler(val, historico, bs63, 63)
+    sel3 = {_ui(SECTOR_UI, t.sector): float(t.seleccion_pp)
+            for t in bf63["tabla"].itertuples()}
+
+    sectores = sorted(set(w_p) | set(w_b))
+    filas, puntos = [], []
+    for sec in sectores:
+        rends = {}
+        for k, s in ventanas.items():
+            r_ = bench_sec[k].get(sec)
+            if r_ is None and sec in ascii_de:
+                r_ = _rend_sector_portafolio(historico, val, ascii_de[sec], s)
+            rends[k] = r_
+        if rends["3m"] is None or rends["1m"] is None:
+            continue
+
+        fr1 = (rends["1m"] - ipc["1m"]) * 100.0
+        fr3 = (rends["3m"] - ipc["3m"]) * 100.0
+        cuad = ("Líder" if fr3 >= 0 and fr1 >= 0 else
+                "Debilitándose" if fr3 >= 0 else
+                "Mejorando" if fr1 >= 0 else "Rezagado")
+
+        wp, wb = w_p.get(sec, 0.0), w_b.get(sec, 0.0)
+        act = wp - wb
+        sl = sel3.get(sec)
+        fuera = wb == 0.0
+
+        # reglas de sugerencia (umbral de peso activo: 2 pp)
+        if cuad == "Líder" and act < -2:
+            sug, razon = "Aumentar", (
+                f"momentum relativo positivo (FR 3m {fr3:+.1f} pp) con "
+                f"subponderación de {-act:.1f} pp")
+        elif cuad == "Mejorando" and act < -2:
+            sug, razon = "Acumular", (
+                f"el sector acelera (FR 1m {fr1:+.1f} pp) desde rezago; "
+                f"subponderación de {-act:.1f} pp")
+        elif cuad == "Rezagado" and act > 2:
+            sug, razon = "Reducir", (
+                f"momentum relativo negativo (FR 3m {fr3:+.1f} pp) con "
+                f"sobreponderación de {act:.1f} pp")
+        elif cuad == "Debilitándose" and act > 2:
+            sug, razon = "Vigilar", (
+                f"el sector pierde tracción (FR 1m {fr1:+.1f} pp) y se "
+                f"sobrepondera {act:.1f} pp")
+        else:
+            sug, razon = "Mantener", "peso activo dentro de banda (±2 pp)"
+        if sl is not None and sl < -0.3:
+            if sug == "Mantener":
+                sug = "Revisar selección"
+                razon = f"la selección de emisoras resta {abs(sl):.1f} pp a 3m"
+            else:
+                razon += f"; la selección resta {abs(sl):.1f} pp"
+        if fuera:
+            razon += " · fuera del índice"
+
+        def _pc(v, dec=1):
+            return (f"{v*100:+.{dec}f} %" if v is not None else "—")
+
+        filas.append(dict(
+            sector=sec, wpF=f"{wp:.1f} %", wbF=f"{wb:.1f} %",
+            actF=f"{act:+.1f} pp",
+            actC="var(--pos)" if act > 0 else "var(--neg)" if act < 0 else "var(--ink3)",
+            r1F=_pc(rends["1m"]),
+            r1C="var(--pos)" if rends["1m"] >= 0 else "var(--neg)",
+            r3F=_pc(rends["3m"]),
+            r3C="var(--pos)" if rends["3m"] >= 0 else "var(--neg)",
+            r6F=_pc(rends["6m"]),
+            r6C=("var(--pos)" if (rends["6m"] or 0) >= 0 else "var(--neg)"),
+            frF=f"{fr3:+.1f} pp",
+            frC="var(--pos)" if fr3 >= 0 else "var(--neg)",
+            cuad=cuad, cuadC=_CUADRANTE_COLOR[cuad],
+            sug=sug, sugC=_SUGERENCIA_COLOR[sug],
+            tip=(f"{sec}|{cuad} · FR 3m {fr3:+.1f} pp · FR 1m {fr1:+.1f} pp"
+                 f"|Peso {wp:.1f} % vs bench {wb:.1f} % ({act:+.1f} pp)"
+                 f"|{sug}: {razon}"),
+            _orden=(0 if sug != "Mantener" else 1, -abs(act)),
+            _fr1=fr1, _fr3=fr3, _wp=wp, _razon=razon,
+        ))
+
+    # burbujas del mapa (viewBox 520 x 290)
+    W_, H_, mx_, my_ = 520.0, 290.0, 46.0, 30.0
+    lim_x = max(abs(f["_fr3"]) for f in filas) * 1.2 or 1.0
+    lim_y = max(abs(f["_fr1"]) for f in filas) * 1.2 or 1.0
+    for f in filas:
+        cx = (W_ / 2) + f["_fr3"] / lim_x * (W_ / 2 - mx_)
+        cy = (H_ / 2) - f["_fr1"] / lim_y * (H_ / 2 - my_)
+        rr = 5.0 + (f["_wp"] ** 0.5) * 2.1
+        puntos.append(dict(
+            cx=f"{cx:.0f}", cy=f"{cy:.0f}", r=f"{rr:.1f}",
+            color=f["cuadC"], label=_ABREV_SECTOR.get(f["sector"], f["sector"]),
+            lx=f"{cx:.0f}", ly=f"{cy - rr - 5:.0f}", tip=f["tip"]))
+
+    filas.sort(key=lambda f: f["_orden"])
+
+    # sugerencias destacadas (las accionables primero)
+    iconos = {"Aumentar": ("▲", "var(--pos)"), "Acumular": ("▲", "var(--brand-lite)"),
+              "Reducir": ("▼", "var(--neg)"), "Vigilar": ("◆", "var(--warn)"),
+              "Revisar selección": ("✎", "var(--warn)")}
+    sugerencias = []
+    for f in filas:
+        if f["sug"] == "Mantener":
+            continue
+        ic, col = iconos.get(f["sug"], ("•", "var(--ink2)"))
+        sugerencias.append(dict(
+            icon=ic, color=col,
+            titulo=f"{f['sector']} — {f['sug'].lower()}",
+            detalle=f["_razon"][0].upper() + f["_razon"][1:] + "."))
+    if not sugerencias:
+        sugerencias = [dict(icon="✓", color="var(--pos)",
+                            titulo="Ponderación alineada",
+                            detalle="Ningún sector fuera de banda con las "
+                                    "reglas vigentes (±2 pp de peso activo).")]
+
+    for f in filas:
+        for k in ("_orden", "_fr1", "_fr3", "_wp", "_razon"):
+            f.pop(k)
+
+    return dict(
+        filas=filas, puntos=puntos, sugerencias=sugerencias[:5],
+        ipc1F=f"{ipc['1m']*100:+.1f} %", ipc3F=f"{ipc['3m']*100:+.1f} %",
+        ipc6F=(f"{ipc['6m']*100:+.1f} %" if ipc["6m"] is not None else "—"),
+        notaMapa=("Cada burbuja es un sector; el tamaño es su peso en el "
+                  "portafolio y el color su cuadrante. La fuerza relativa "
+                  "(FR) es el rendimiento del sector menos el del IPC en la "
+                  "ventana. El giro típico es horario: Mejorando → Líder → "
+                  "Debilitándose → Rezagado."),
+        notaMetodo=("Rendimientos sectoriales del benchmark reconstruido a "
+                    "nivel constituyente (sectores fuera del índice: con las "
+                    "emisoras del portafolio). Sugerencias por reglas "
+                    "cuantitativas: cuadrante de rotación × peso activo "
+                    "(banda ±2 pp) × selección Brinson 3m. Documento de "
+                    "trabajo; no constituye una recomendación de inversión."),
+    )
+
+
+def _seccion_rotacion(html: str, rot: dict) -> str:
+    # ---- navegacion, titulos y bandera de pestana ------------------------
+    html = _sub(html,
+        "['diagnostico','Diagnóstico','08'],['configuracion','Configuración','09']",
+        "['diagnostico','Diagnóstico','08'],['rotacion','Rotación','09'],"
+        "['configuracion','Configuración','10']")
+    html = _sub(html,
+        "configuracion: ['Configuración', 'Fuentes de datos",
+        "rotacion: ['Rotación sectorial', 'Momentum relativo vs IPC y "
+        "sugerencias de ponderación'], configuracion: ['Configuración', "
+        "'Fuentes de datos")
+    html = _sub(html,
+        "isOperaciones: this.state.tab === 'operaciones', isDiagnostico: "
+        "this.state.tab === 'diagnostico', isConfiguracion: this.state.tab "
+        "=== 'configuracion',",
+        "isOperaciones: this.state.tab === 'operaciones', isDiagnostico: "
+        "this.state.tab === 'diagnostico', isConfiguracion: this.state.tab "
+        "=== 'configuracion', isRotacion: this.state.tab === 'rotacion', "
+        "rot: " + js(rot) + ",")
+
+    # ---- seccion del template -------------------------------------------
+    TD = '<\\u002Fdiv>'
+    TS = '<\\u002Fspan>'
+    card = ('background:var(--surf);border:1px solid var(--border);'
+            'border-radius:6px;padding:14px 16px')
+    header = ('font:700 10px/1 var(--sans);letter-spacing:.14em;'
+              'text-transform:uppercase;color:var(--ink3);margin-bottom:12px')
+    nota = ('font:400 10.5px/1.55 var(--sans);color:var(--ink3);'
+            'margin-top:10px;border-top:1px dashed var(--border);'
+            'padding-top:8px')
+    th = ('text-align:right;font:700 9px/1 var(--sans);'
+          'letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);'
+          'padding:9px 10px')
+    td = 'padding:7px 10px;text-align:right;font-family:var(--mono)'
+
+    seccion = (
+        '<!-- ================= ROTACIÓN ================= -->\\n'
+        '      <sc-if value=\\"{{ isRotacion }}\\" '
+        'hint-placeholder-val=\\"{{ false }}\\">\\n'
+        '      <div style=\\"display:grid;grid-template-columns:1.25fr 1fr;'
+        'gap:14px;margin-bottom:14px\\">\\n'
+        # ---- mapa de rotacion ----
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Mapa de rotación sectorial'
+        '<span style=\\"font-weight:500;text-transform:none;letter-spacing:0\\">'
+        ' · FR = sector − IPC' + TS + TD +
+        '<svg viewBox=\\"0 0 520 290\\" style=\\"width:100%;height:auto\\">'
+        '<rect x=\\"0\\" y=\\"0\\" width=\\"520\\" height=\\"290\\" '
+        'fill=\\"var(--surf2)\\" rx=\\"4\\"><\\u002Frect>'
+        '<line x1=\\"260\\" y1=\\"8\\" x2=\\"260\\" y2=\\"282\\" '
+        'stroke=\\"var(--border2)\\"><\\u002Fline>'
+        '<line x1=\\"10\\" y1=\\"145\\" x2=\\"510\\" y2=\\"145\\" '
+        'stroke=\\"var(--border2)\\"><\\u002Fline>'
+        '<text x=\\"14\\" y=\\"20\\" font-family=\\"var(--sans)\\" '
+        'font-size=\\"10\\" font-weight=\\"700\\" '
+        'fill=\\"var(--brand-lite)\\" opacity=\\".8\\">MEJORANDO<\\u002Ftext>'
+        '<text x=\\"506\\" y=\\"20\\" text-anchor=\\"end\\" '
+        'font-family=\\"var(--sans)\\" font-size=\\"10\\" '
+        'font-weight=\\"700\\" fill=\\"var(--pos)\\" opacity=\\".8\\">'
+        'LÍDER<\\u002Ftext>'
+        '<text x=\\"14\\" y=\\"280\\" font-family=\\"var(--sans)\\" '
+        'font-size=\\"10\\" font-weight=\\"700\\" fill=\\"var(--neg)\\" '
+        'opacity=\\".8\\">REZAGADO<\\u002Ftext>'
+        '<text x=\\"506\\" y=\\"280\\" text-anchor=\\"end\\" '
+        'font-family=\\"var(--sans)\\" font-size=\\"10\\" '
+        'font-weight=\\"700\\" fill=\\"var(--warn)\\" opacity=\\".8\\">'
+        'DEBILITÁNDOSE<\\u002Ftext>'
+        '<text x=\\"506\\" y=\\"158\\" text-anchor=\\"end\\" '
+        'font-family=\\"var(--mono)\\" font-size=\\"8.5\\" '
+        'fill=\\"var(--ink3)\\">FR 3m →<\\u002Ftext>'
+        '<text x=\\"266\\" y=\\"18\\" font-family=\\"var(--mono)\\" '
+        'font-size=\\"8.5\\" fill=\\"var(--ink3)\\">↑ FR 1m<\\u002Ftext>'
+        '<sc-for list=\\"{{ rot.puntos }}\\" as=\\"p\\" '
+        'hint-placeholder-count=\\"8\\">'
+        '<circle data-tip=\\"{{ p.tip }}\\" cx=\\"{{ p.cx }}\\" '
+        'cy=\\"{{ p.cy }}\\" r=\\"{{ p.r }}\\" fill=\\"{{ p.color }}\\" '
+        'opacity=\\"0.78\\" stroke=\\"var(--surf)\\" '
+        'stroke-width=\\"1.5\\"><\\u002Fcircle>'
+        '<text x=\\"{{ p.lx }}\\" y=\\"{{ p.ly }}\\" '
+        'text-anchor=\\"middle\\" font-family=\\"var(--mono)\\" '
+        'font-size=\\"8.5\\" fill=\\"var(--ink2)\\">{{ p.label }}'
+        '<\\u002Ftext><\\u002Fsc-for><\\u002Fsvg>'
+        '<div style=\\"' + nota + '\\">{{ rot.notaMapa }}' + TD + TD + '\\n'
+        # ---- sugerencias del modelo ----
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Sugerencias de ponderación'
+        '<span style=\\"font-weight:500;text-transform:none;letter-spacing:0\\">'
+        ' · IPC 1m {{ rot.ipc1F }} · 3m {{ rot.ipc3F }} · 6m {{ rot.ipc6F }}'
+        + TS + TD +
+        '<sc-for list=\\"{{ rot.sugerencias }}\\" as=\\"g\\" '
+        'hint-placeholder-count=\\"4\\">'
+        '<div style=\\"display:flex;gap:10px;padding:9px 10px;'
+        'margin-bottom:7px;background:var(--surf2);border-radius:5px;'
+        'border-left:3px solid {{ g.color }}\\">'
+        '<div style=\\"color:{{ g.color }};font-size:12px;line-height:1.3\\">'
+        '{{ g.icon }}' + TD +
+        '<div><div style=\\"font:600 11.5px/1.3 var(--sans);'
+        'color:var(--ink)\\">{{ g.titulo }}' + TD +
+        '<div style=\\"font:400 10.5px/1.5 var(--sans);'
+        'color:var(--ink2);margin-top:2px\\">{{ g.detalle }}' + TD + TD + TD +
+        '<\\u002Fsc-for>'
+        '<div style=\\"' + nota + '\\">{{ rot.notaMetodo }}' + TD + TD + TD + '\\n'
+        # ---- tabla ----
+        '      <div style=\\"' + card.replace('padding:14px 16px',
+                                              'padding:0;overflow:hidden')
+        + '\\">\\n'
+        '        <sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:11px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th.replace('text-align:right', 'text-align:left')
+        + '\\">Sector<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">W port.<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">W bench.<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Activo<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">1m<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">3m<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">6m<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">FR 3m<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th.replace('text-align:right', 'text-align:left')
+        + '\\">Cuadrante<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th.replace('text-align:right', 'text-align:left')
+        + '\\">Sugerencia<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ rot.filas }}\\" as=\\"f\\" '
+        'hint-placeholder-count=\\"10\\">'
+        '<sc-raw-tr data-tip=\\"{{ f.tip }}\\" '
+        'style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:7px 10px;font:600 11px var(--sans);'
+        'color:var(--ink)\\">{{ f.sector }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">{{ f.wpF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink3)\\">{{ f.wbF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:{{ f.actC }}\\">{{ f.actF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:{{ f.r1C }}\\">{{ f.r1F }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:{{ f.r3C }}\\">{{ f.r3F }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:{{ f.r6C }}\\">{{ f.r6F }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;color:{{ f.frC }}\\">'
+        '{{ f.frF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"padding:5px 10px\\">'
+        '<span style=\\"display:inline-block;padding:2.5px 8px;'
+        'border-radius:4px;font:600 10px var(--sans);color:{{ f.cuadC }};'
+        'background:color-mix(in srgb, currentColor 13%, transparent)\\">'
+        '{{ f.cuad }}' + TS + '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"padding:5px 10px\\">'
+        '<span style=\\"display:inline-block;padding:2.5px 8px;'
+        'border-radius:4px;font:600 10px var(--sans);color:{{ f.sugC }};'
+        'background:color-mix(in srgb, currentColor 13%, transparent)\\">'
+        '{{ f.sug }}' + TS + '<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
+        '      <\\u002Fsc-if>\\n\\n      ')
+
+    html = _sub(html,
+        '<!-- ================= CONFIGURACIÓN ================= -->',
+        seccion + '<!-- ================= CONFIGURACIÓN ================= -->')
+    return html
 
 
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
