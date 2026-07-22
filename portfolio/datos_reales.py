@@ -303,6 +303,84 @@ def _bloque_riesgo(d: dict) -> dict:
     tips_dd = [f"{f.day} {MES_UI[f.month]} {f.year}|Caída {v:.2f} %"
                for f, v in zip(idx, dd)]
     serie_dd = dict(W=1000, padL=0, padR=0, n=n, tips=tips_dd)
+
+    # --- capa explicativa: marcadores, eje y notas de lectura -------------
+    # El histograma del VaR es la grafica de riesgo central y venia sin eje
+    # ni marcadores; cada nota traduce la metrica a una lectura de mesa con
+    # los montos del mandato.
+    def _posx(x: float) -> float:
+        return max(1.5, min(98.5, (x + lim) / (2 * lim) * 100.0))
+
+    monto95 = valor_instr * abs(var95)
+    monto99 = valor_instr * abs(var99)
+    cvar = riesgo["cvar_95"] / 100.0
+    n_ses = int(len(r))
+
+    beta_txt = f"{beta:.2f}"
+    usd_txt = f"{fx['usd_pct']:.0f} %"
+
+    corr8 = an.matriz_correlacion(d["ha"], d["val"], top=8)
+    prom_corr = float("nan")
+    par_min = ""
+    if len(corr8) >= 2:
+        m_ = corr8.values
+        fuera_diag = m_[~np.eye(len(m_), dtype=bool)]
+        prom_corr = float(fuera_diag.mean())
+        i_, j_ = np.unravel_index(np.argmin(m_ + np.eye(len(m_)) * 2), m_.shape)
+        par_min = (f"{corr8.index[i_]} y {corr8.columns[j_]} "
+                   f"({m_[i_, j_]:+.2f})")
+
+    top_riesgo = d["rpos"].iloc[0] if len(d["rpos"]) else None
+    fecha_dd = idx[int(np.argmin(dd))]
+
+    bloque.update(
+        var95X=round(_posx(var95), 2), var99X=round(_posx(var99), 2),
+        var95F=f"{riesgo['var_95']:.2f} %", var99F=f"{riesgo['var_99']:.2f} %",
+        cvarF=f"{riesgo['cvar_95']:.2f} %",
+        var95Tip=(f"VaR 95 % (histórico)|Pérdida diaria que sólo se excede "
+                  f"1 de cada 20 sesiones|{riesgo['var_95']:.2f} % "
+                  f"≈ {_fM(monto95)}"),
+        var99Tip=(f"VaR 99 % (histórico)|Pérdida diaria que sólo se excede "
+                  f"1 de cada 100 sesiones|{riesgo['var_99']:.2f} % "
+                  f"≈ {_fM(monto99)}"),
+        ejeLo=f"{-lim*100:.1f}%", ejeMedLo=f"{-lim*50:.1f}%",
+        ejeMedHi=f"+{lim*50:.1f}%", ejeHi=f"+{lim*100:.1f}%",
+        notaVar=(f"Distribución de los últimos {n_ses} rendimientos diarios. "
+                 f"Lectura: con 95 % de confianza la pérdida de un día no "
+                 f"excede {riesgo['var_95']:.2f} % (≈ {_fM(monto95)} del "
+                 f"mandato); en la peor sesión de cada 100 supera "
+                 f"{riesgo['var_99']:.2f} % (≈ {_fM(monto99)}). Cuando la "
+                 f"pérdida cae en la cola del 5 %, el promedio (CVaR) es "
+                 f"{riesgo['cvar_95']:.2f} % ≈ {_fM(valor_instr * abs(cvar))}."),
+        notaStress=(f"Impacto estimado con las sensibilidades observadas del "
+                    f"portafolio: β {beta_txt} contra el IPC y {usd_txt} de "
+                    f"exposición USD. Pérdida esperada = β × choque de índice "
+                    f"+ exposición USD × choque cambiario."),
+        notaFactores=(f"Sensibilidades por regresión sobre la ventana: un "
+                      f"movimiento de −1 % del IPC mueve al portafolio "
+                      f"≈ {b_ipc:+.2f} % y una depreciación de 1 % del peso "
+                      f"lo mueve ≈ {b_fx:+.2f} %."
+                      if b_ipc == b_ipc else
+                      "Sensibilidades por regresión sobre la ventana."),
+        notaPesoRiesgo=(f"Contribución marginal al riesgo con la matriz de "
+                        f"covarianzas: una barra de riesgo mayor que la de "
+                        f"peso señala sobreconsumo del presupuesto. Hoy la "
+                        f"mayor es {top_riesgo['emisora']} con "
+                        f"{top_riesgo['contrib_riesgo_pct']:.1f} % del riesgo "
+                        f"sobre {top_riesgo['peso_pct']:.1f} % del peso."
+                        if top_riesgo is not None else ""),
+        notaCorr=(f"Correlación de rendimientos diarios entre las ocho "
+                  f"mayores posiciones (promedio {prom_corr:+.2f}). Valores "
+                  f"altos restan diversificación; el par más defensivo es "
+                  f"{par_min}."
+                  if prom_corr == prom_corr else ""),
+        notaScatter=("Cada burbuja es una posición; el tamaño es su peso. "
+                     "El cuadrante deseable es arriba a la izquierda: más "
+                     "rendimiento por unidad de volatilidad."),
+        notaDd=(f"Caída acumulada desde el máximo previo de la cartera "
+                f"vigente. El peor punto de la ventana fue {min_dd:.1f} % "
+                f"el {fecha_dd.day} {MES_UI[fecha_dd.month]} {fecha_dd.year}."),
+    )
     return bloque, serie_dd
 
 
@@ -559,6 +637,9 @@ def inyectar(html: str, d: dict) -> str:
     html = _sub_re(html, r"const hallazgos = \[.*?\];",
                    f"const hallazgos = {js(_hallazgos(d))};")
 
+    # --- 7b. riesgo explicativo (antes de la capa interactiva) ------------
+    html = _riesgo_explicativo(html)
+
     # --- 8. capa interactiva: tooltips y crosshair ------------------------
     html = _capa_interactiva(html, d, serie_perf, serie_dd)
     html = _tabla_posiciones(html)
@@ -668,12 +749,6 @@ def _capa_interactiva(html: str, d: dict, serie_perf: dict,
     ipc_chart = serie_perf["tips"][-1].split("|")[-1].replace("IPC ", "")
     delta_ipc = float(ipc_chart) - 100.0
     html = _sub(html, ">IPC +7.10 %<", f">IPC {delta_ipc:+.2f} %<")
-    html = _sub(html, "VaR 95 · −1.62 %",
-                f"VaR 95 · {riesgo['var_95']:.2f} %".replace("-", "−"))
-    html = _sub(html, "VaR 99 · −2.74 %",
-                f"VaR 99 · {riesgo['var_99']:.2f} %".replace("-", "−"))
-    html = _sub(html, "CVaR 95 · −2.19 %",
-                f"CVaR 95 · {riesgo['cvar_95']:.2f} %".replace("-", "−"))
     html = _sub(html, "Activo +{{ activoF }} pp", "Activo {{ activoF }} pp")
     html = _sub(html, '<span style=\\"color:var(--pos)\\">Activo ',
                 '<span style=\\"color:{{ activoCol }}\\">Activo ')
@@ -897,6 +972,125 @@ def _tabla_posiciones(html: str) -> str:
         'style-hover=\\"background:var(--surf2)\\" '
         'style=\\"border-top:1px solid var(--border)\\">')
     return html
+
+
+# --------------------------------------------------------------------------
+# Riesgo explicativo: eje y marcadores en el histograma del VaR, y notas de
+# lectura con datos reales bajo cada grafica de la pestana
+# --------------------------------------------------------------------------
+# Las graficas de riesgo eran marcas sin apoyo: el histograma no tenia eje ni
+# senalaba donde caen los VaR, y ninguna grafica decia como leerse. Los
+# textos viven en risk.* (se calculan en _bloque_riesgo con las cifras del
+# mandato); aqui solo se les da lugar en el template. Debe ejecutarse ANTES
+# de _capa_interactiva para trabajar sobre anclas pristinas.
+
+_NOTA_STL = ('font:400 10.5px/1.55 var(--sans);color:var(--ink3);'
+             'margin:0 0 10px')
+
+
+def _nota(campo: str) -> str:
+    return ('<div style=\\"' + _NOTA_STL + '\\">{{ risk.' + campo
+            + ' }}<\\u002Fdiv>')
+
+
+def _riesgo_explicativo(html: str) -> str:
+    # ---- 1. histograma: contenedor relativo con espacio para etiquetas ---
+    html = _sub(html,
+        '<div style=\\"display:flex;align-items:flex-end;gap:2px;'
+        'height:160px;padding-top:8px\\">',
+        '<div style=\\"position:relative;display:flex;align-items:flex-end;'
+        'gap:2px;height:160px;padding-top:8px;margin-top:18px\\">')
+
+    # ---- 2. marcadores de VaR 95/99 sobre la distribucion ----------------
+    html = _sub(html,
+        'min-height:2px\\"><\\u002Fdiv><\\u002Fsc-for>',
+        'min-height:2px\\"><\\u002Fdiv><\\u002Fsc-for>'
+        '<div data-tip=\\"{{ risk.var95Tip }}\\" style=\\"position:absolute;'
+        'left:{{ risk.var95X }}%;top:0;bottom:0;'
+        'border-left:2px dashed var(--neg);opacity:.7\\"><\\u002Fdiv>'
+        '<div style=\\"position:absolute;left:{{ risk.var95X }}%;top:-15px;'
+        'transform:translateX(-50%);font:700 8.5px var(--mono);'
+        'color:var(--neg);white-space:nowrap;opacity:.85\\">VaR 95'
+        '<\\u002Fdiv>'
+        '<div data-tip=\\"{{ risk.var99Tip }}\\" style=\\"position:absolute;'
+        'left:{{ risk.var99X }}%;top:0;bottom:0;'
+        'border-left:2px solid var(--neg)\\"><\\u002Fdiv>'
+        '<div style=\\"position:absolute;left:{{ risk.var99X }}%;top:-15px;'
+        'transform:translateX(-50%);font:700 8.5px var(--mono);'
+        'color:var(--neg);white-space:nowrap\\">VaR 99<\\u002Fdiv>')
+
+    # ---- 3. eje X + leyenda de zonas + nota de lectura -------------------
+    html = _sub(html,
+        '<div style=\\"display:flex;gap:16px;margin-top:10px;'
+        'font-family:var(--mono);font-size:10px\\">'
+        '<span style=\\"color:var(--neg)\\">VaR 95 · −1.62 %'
+        '<\\u002Fspan>'
+        '<span style=\\"color:var(--neg)\\">VaR 99 · −2.74 %'
+        '<\\u002Fspan>'
+        '<span style=\\"color:var(--ink3)\\">CVaR 95 · −2.19 %'
+        '<\\u002Fspan><\\u002Fdiv>',
+        # eje X
+        '<div style=\\"display:flex;justify-content:space-between;'
+        'font:500 9px var(--mono);color:var(--ink3);margin-top:3px\\">'
+        '<span>{{ risk.ejeLo }}<\\u002Fspan>'
+        '<span>{{ risk.ejeMedLo }}<\\u002Fspan><span>0<\\u002Fspan>'
+        '<span>{{ risk.ejeMedHi }}<\\u002Fspan>'
+        '<span>{{ risk.ejeHi }}<\\u002Fspan><\\u002Fdiv>'
+        # leyenda de zonas
+        '<div style=\\"display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;'
+        'font-family:var(--mono);font-size:10px;align-items:center\\">'
+        '<span style=\\"display:inline-flex;align-items:center;gap:5px\\">'
+        '<span style=\\"width:9px;height:9px;border-radius:2px;'
+        'background:var(--brand-lite);display:inline-block\\"><\\u002Fspan>'
+        'sesión típica<\\u002Fspan>'
+        '<span style=\\"display:inline-flex;align-items:center;gap:5px\\">'
+        '<span style=\\"width:9px;height:9px;border-radius:2px;'
+        'background:color-mix(in srgb, var(--neg) 55%, transparent);'
+        'display:inline-block\\"><\\u002Fspan>'
+        'cola 5 % · VaR 95 {{ risk.var95F }}<\\u002Fspan>'
+        '<span style=\\"display:inline-flex;align-items:center;gap:5px\\">'
+        '<span style=\\"width:9px;height:9px;border-radius:2px;'
+        'background:var(--neg);display:inline-block\\"><\\u002Fspan>'
+        'cola 1 % · VaR 99 {{ risk.var99F }}<\\u002Fspan>'
+        '<span style=\\"color:var(--ink3)\\">CVaR 95 {{ risk.cvarF }}'
+        '<\\u002Fspan><\\u002Fdiv>'
+        # nota de lectura
+        '<div style=\\"font:400 10.5px/1.6 var(--sans);'
+        'color:var(--ink3);margin-top:9px;border-top:1px dashed var(--border);'
+        'padding-top:8px\\">{{ risk.notaVar }}<\\u002Fdiv>')
+
+    # ---- 4. notas de lectura en el resto de las graficas -----------------
+    for campo, ancla in [
+        ("notaStress",
+         '<sc-for list=\\"{{ risk.stress }}\\" as=\\"s\\" '
+         'hint-placeholder-count=\\"7\\">'),
+        ("notaFactores",
+         '<sc-for list=\\"{{ risk.factors }}\\" as=\\"f\\" '
+         'hint-placeholder-count=\\"8\\">'),
+        ("notaPesoRiesgo",
+         '<sc-for list=\\"{{ riskWeight }}\\" as=\\"r\\" '
+         'hint-placeholder-count=\\"8\\">'),
+        ("notaCorr",
+         '<sc-for list=\\"{{ corrRows }}\\" as=\\"row\\" '
+         'hint-placeholder-count=\\"8\\">'),
+    ]:
+        html = _sub(html, ancla, _nota(campo) + ancla)
+
+    # ---- 5. dispersion: ejes con nombre completo + nota ------------------
+    html = _sub(html, '>vol →<', '>Volatilidad anual (%) →<')
+    html = _sub(html, '>rend<', '>↑ Rend. (%)<')
+    html = _sub(html,
+        '>↑ Rend. (%)<\\u002Ftext><\\u002Fsvg>',
+        '>↑ Rend. (%)<\\u002Ftext><\\u002Fsvg>' + _nota("notaScatter"))
+
+    # ---- 6. drawdown: nota tras su grafica -------------------------------
+    rx = re.compile(
+        re.escape('points=\\"{{ risk.ddLine }}\\"') + ".*?"
+        + re.escape('<\\u002Fsvg>'), re.S)
+    nuevo, cuantos = rx.subn(lambda m: m.group(0) + _nota("notaDd"), html,
+                             count=1)
+    assert cuantos == 1, "No se encontro la grafica de drawdown"
+    return nuevo
 
 
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
