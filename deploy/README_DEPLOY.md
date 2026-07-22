@@ -86,8 +86,20 @@ components.html(html, height=940, scrolling=True)
 
 ## Nota sobre los datos
 
-El tablero muestra **datos de ejemplo** coherentes con la taxonomía del repo
-(30 emisoras, sectores, IPC como benchmark). Para conectarlo a las cifras
-reales que ya calcula `app.py`, el siguiente paso es inyectar esos valores al
-HTML (por ejemplo, serializando los datos a JSON e insertándolos antes de
-servir el componente). Puedo ayudarte con esa integración cuando quieras.
+El tablero se sirve **con datos reales**: `streamlit_dashboard.py` llama a
+`datos_reales.py`, que corre el mismo pipeline que `app.py` (posición base +
+boletas del custodio + precios vivos de Yahoo + analítica completa) e inyecta
+las cifras en el HTML antes de servirlo, con caché de 5 minutos. Se sustituyen
+la posición completa, la liquidez, todas las métricas de riesgo, la atribución
+Brinson-Fachler de los cuatro periodos (el selector es funcional), la gráfica
+de desempeño vs IPC, el histograma de rendimientos, los escenarios de estrés
+parametrizados con la beta y la exposición USD reales, las cargas factoriales
+por regresión, las correlaciones, la bitácora de operaciones y el diagnóstico.
+
+Si el cálculo falla (por ejemplo, sin acceso a internet), la app cae al HTML
+con datos de ejemplo y lo advierte en pantalla.
+
+`dashboard_baz.html` en disco conserva los datos de ejemplo a propósito: es la
+plantilla sobre la que se inyecta. Si regeneras el HTML desde el componente de
+diseño, verifica que `datos_reales.py` siga encontrando sus anclas (los
+reemplazos fallan ruidosamente si el HTML cambió de forma).

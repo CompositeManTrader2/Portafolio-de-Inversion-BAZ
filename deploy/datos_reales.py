@@ -1,0 +1,554 @@
+"""
+Alimenta el tablero HTML rediseñado con los datos reales del portafolio.
+
+El HTML trae un componente cuyo estado de ejemplo vive en literales de
+JavaScript (SEED, EFECTIVO, métricas de riesgo, atribución, operaciones,
+series de las gráficas). Este módulo corre el mismo pipeline que app.py
+(posición + boletas + precios vivos + analítica) y sustituye cada literal
+por su valor real ANTES de servir la página, mediante reemplazos anclados
+que fallan ruidosamente si el HTML cambia de forma.
+
+Los reemplazos se hacen server-side en cada carga (con caché de 5 minutos
+en el wrapper), de modo que el HTML sigue siendo autocontenido: el navegador
+recibe una página estática cuyo interior ya son cifras reales.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+RAIZ = Path(__file__).parent.parent
+sys.path.insert(0, str(RAIZ))
+
+from portfolio import analytics as an          # noqa: E402
+from portfolio import benchmark as bmk         # noqa: E402
+from portfolio import engine as eng            # noqa: E402
+from portfolio import loader as ld             # noqa: E402
+from portfolio import market as mk             # noqa: E402
+from portfolio.taxonomy import BENCHMARK_TICKER, FX_TICKER  # noqa: E402
+
+DATOS = RAIZ / "data"
+FECHA_BASE = date(2026, 7, 15)
+
+# El tablero usa nombres con acento; la taxonomia interna es ASCII.
+SECTOR_UI = {
+    "Consumo Basico": "Consumo Básico", "Indice Amplio": "Índice Amplio",
+    "Tecnologia": "Tecnología", "Telecomunicaciones": "Telecomunicaciones",
+}
+REGION_UI = {
+    "Mexico": "México", "Japon": "Japón",
+    "Desarrollados ex-EE.UU.": "Des. ex-EE.UU.",
+}
+CLASE_UI = {"Accion": "Acción"}
+MES_UI = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+          "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+
+def _ui(mapa: dict, v: str) -> str:
+    return mapa.get(v, v)
+
+
+# --------------------------------------------------------------------------
+# Serializador a literales de JavaScript
+# --------------------------------------------------------------------------
+# El componente vive dentro de una cadena JS del bundle donde las comillas
+# dobles van escapadas; serializar con comillas simples y ASCII puro evita
+# tocar ese esquema de escape.
+
+def js(v) -> str:
+    if isinstance(v, str):
+        # Contexto de doble escape: el componente es a su vez una cadena JS
+        # del bundle, que decodifica una vez. Un apostrofe debe llegar alli
+        # como \' , por lo que aqui se emite \\' ; los no-ASCII van como
+        # \uXXXX, que el nivel exterior decodifica al caracter real (valido
+        # dentro de la cadena interior). Nunca se emiten comillas dobles.
+        cuerpo = "".join(
+            c if 32 <= ord(c) < 127 and c not in "'\\\"" else
+            ("\\\\'" if c == "'" else "\\\\\\\\" if c == "\\" else
+             f"\\u{ord(c):04x}")
+            for c in v)
+        return f"'{cuerpo}'"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    if isinstance(v, (float, np.floating)):
+        if not np.isfinite(v):
+            return "0"
+        return repr(float(v))
+    if isinstance(v, (list, tuple)):
+        return "[" + ",".join(js(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ",".join(
+            (k if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) else js(k))
+            + ":" + js(x) for k, x in v.items()) + "}"
+    raise TypeError(f"No serializable a JS: {type(v)}")
+
+
+def _fM(v: float) -> str:
+    """Replica el formateador fM del componente: '$-3.06 M'."""
+    return f"${v/1e6:,.2f} M"
+
+
+# --------------------------------------------------------------------------
+# Pipeline: identico al de app.py
+# --------------------------------------------------------------------------
+
+def calcular(ventana: int = 252, tasa_libre: float = 0.09,
+             efectivo_inicial: float = 0.0) -> dict:
+    pos_path = next(p for p in sorted(DATOS.glob("*.xlsx"))
+                    if "posici" in p.name.lower())
+    base = ld.leer_posicion_base(pos_path.read_bytes(), "Hoja1")
+
+    bloques = [ld.leer_operaciones(p.read_bytes(), fuente=f"boleta {p.stem[:14]}")
+               for p in sorted(DATOS.glob("*.xlsx")) if p != pos_path]
+    bloques.append(ld.leer_movimientos(pos_path.read_bytes(), None))
+    movimientos = ld.consolidar_movimientos(*bloques)
+
+    res = eng.construir_posicion(base.df, movimientos, efectivo_inicial)
+
+    bench_df = bmk.cargar_benchmark()
+    tickers = tuple(t for t in res.posiciones["ticker"] if t)
+    universo = tuple(dict.fromkeys(
+        tickers + bmk.tickers_benchmark(bench_df)
+        + (BENCHMARK_TICKER, FX_TICKER)))
+
+    vigentes = mk.precios_vigentes(tickers)
+    historico = mk.descargar_historico(universo, dias=int(ventana * 1.5))
+    precios, previos = mk.mapas_de_precio(vigentes)
+
+    val = eng.valuar(res.posiciones, precios, previos)
+    resumen = eng.resumen_cartera(val, res.efectivo, res.realizado)
+
+    ha = historico.drop(columns=[BENCHMARK_TICKER, FX_TICKER], errors="ignore")
+    bench_hist = historico[BENCHMARK_TICKER].dropna()
+    fx_hist = historico[FX_TICKER].dropna()
+
+    rend_port = an.rendimientos_portafolio(ha, val)
+    rend_bench = np.log(bench_hist / bench_hist.shift(1)).dropna()
+    rend_fx = np.log(fx_hist / fx_hist.shift(1)).dropna()
+
+    riesgo = an.metricas_riesgo(rend_port, rend_bench, tasa_libre)
+    vol_bench = float(rend_bench.std(ddof=1) * np.sqrt(252))
+    ext = an.metricas_extendidas(rend_port, rend_bench, tasa_libre,
+                                 riesgo["beta"], vol_bench)
+    conc = an.metricas_concentracion(val)
+    rpos = an.descomposicion_riesgo(ha, val)
+    fx = an.exposicion_fx(val)
+
+    sv_real = an.serie_valor_real(historico, base.df, res.bitacora,
+                                  efectivo_inicial, FECHA_BASE)
+    twr = (float(sv_real.iloc[-1] / sv_real.iloc[0] - 1.0) * 100.0
+           if len(sv_real) >= 2 and sv_real.iloc[0] else None)
+    b_per = bench_hist[bench_hist.index >= pd.Timestamp(FECHA_BASE)]
+    ipc_per = (float(b_per.iloc[-1] / b_per.iloc[0] - 1.0) * 100.0
+               if len(b_per) >= 2 else None)
+
+    return dict(base=base, res=res, val=val, resumen=resumen,
+                historico=historico, ha=ha, bench_hist=bench_hist,
+                rend_port=rend_port, rend_bench=rend_bench, rend_fx=rend_fx,
+                riesgo=riesgo, ext=ext, conc=conc, rpos=rpos, fx=fx,
+                bench_df=bench_df, twr=twr, ipc_per=ipc_per,
+                tasa_libre=tasa_libre)
+
+
+# --------------------------------------------------------------------------
+# Constructores de cada bloque inyectado
+# --------------------------------------------------------------------------
+
+def _seed(val: pd.DataFrame) -> list:
+    filas = []
+    for _, r in val.iterrows():
+        filas.append([
+            r["emisora"], _ui(SECTOR_UI, r["sector"]),
+            _ui(REGION_UI, r["region"]), r["mercado"],
+            _ui(CLASE_UI, r["clase_activo"]),
+            float(r["precio_mercado"]),
+            float(r["valor_mercado"]) / 1e6,
+            float(r["rend_pct"]),
+            float(r["var_dia_pct"]) if r["var_dia_pct"] == r["var_dia_pct"] else 0.0,
+            r["divisa_subyacente"],
+        ])
+    return filas
+
+
+def _grafica_desempeno(ha, val, bench_hist, n_max: int = 180) -> dict:
+    """Puntos SVG reales para la linea portafolio vs IPC (base 100)."""
+    serie = an.serie_valor_portafolio(ha, val).tail(n_max)
+    ipc = bench_hist.reindex(serie.index).ffill().dropna()
+    serie = serie.reindex(ipc.index)
+    if len(serie) < 10:
+        raise ValueError("Serie de desempeno insuficiente")
+
+    p = (serie / serie.iloc[0] * 100.0).values
+    b = (ipc / ipc.iloc[0] * 100.0).values
+    n = len(p)
+    lo = float(np.floor(min(p.min(), b.min()) - 1))
+    hi = float(np.ceil(max(p.max(), b.max()) + 1))
+
+    W, H, padL, padR, padT, padB = 1000, 300, 46, 66, 14, 30
+    X = lambda i: padL + i / (n - 1) * (W - padL - padR)
+    Y = lambda v: padT + (hi - v) / (hi - lo) * (H - padT - padB)
+    pts = lambda a: " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(a))
+
+    marcas = np.linspace(lo, hi, 5)
+    y_ticks = [dict(label=f"{v:.0f}", y=f"{Y(v):.1f}") for v in marcas]
+    idx = serie.index
+    posiciones = [0, int((n - 1) * 0.34), int((n - 1) * 0.66), n - 1]
+    x_ticks = [dict(label=f"{MES_UI[idx[i].month]} {idx[i].year}",
+                    x=f"{X(i):.1f}") for i in posiciones]
+
+    return dict(portPoints=pts(p), ipcPoints=pts(b),
+                yTicks=y_ticks, xTicks=x_ticks,
+                endX=f"{X(n-1):.1f}", portEndY=f"{Y(p[-1]):.1f}",
+                ipcEndY=f"{Y(b[-1]):.1f}")
+
+
+def _bloque_riesgo(d: dict) -> dict:
+    """hist / stress / factors / drawdown con datos reales."""
+    r = np.expm1(d["rend_port"].dropna())
+    riesgo, fx, resumen = d["riesgo"], d["fx"], d["resumen"]
+    valor_instr = resumen["valor_instrumentos"]
+
+    # --- histograma de rendimientos diarios (23 casillas) ---------------
+    bins = 23
+    lim = float(max(abs(r.min()), abs(r.max())) * 1.05)
+    bordes = np.linspace(-lim, lim, bins + 1)
+    conteo, _ = np.histogram(r.values, bins=bordes)
+    mx = conteo.max() or 1
+    var95 = riesgo["var_95"] / 100.0
+    var99 = riesgo["var_99"] / 100.0
+    hist = []
+    for i, c in enumerate(conteo):
+        x = (bordes[i] + bordes[i + 1]) / 2
+        color = ("var(--neg)" if x <= var99 else
+                 "color-mix(in srgb, var(--neg) 55%, transparent)" if x <= var95
+                 else "var(--brand-med)" if x < 0 else "var(--brand-lite)")
+        hist.append(dict(h=f"{c / mx * 100:.0f}", color=color))
+
+    # --- escenarios parametricos con las sensibilidades reales -----------
+    beta = riesgo["beta"] if riesgo["beta"] == riesgo["beta"] else 1.0
+    usd_frac = fx["usd_pct"] / 100.0
+    escenarios = [
+        ("IPC −10 %", beta * -10.0),
+        ("IPC −20 %", beta * -20.0),
+        ("USDMXN +10 %", usd_frac * 10.0),
+        ("USDMXN −10 %", usd_frac * -10.0),
+        ("Mar-2020: IPC −27 %, FX +25 %", beta * -27.0 + usd_frac * 25.0),
+        ("Jun-2024: IPC −6 %, FX +8 %", beta * -6.0 + usd_frac * 8.0),
+    ]
+    smax = max(abs(v) for _, v in escenarios)
+    stress = [dict(name=n_, pct=f"{v:+.1f} %", monto=_fM(valor_instr * v / 100),
+                   w=f"{abs(v) / smax * 100:.0f}",
+                   color="var(--pos)" if v >= 0 else "var(--neg)")
+              for n_, v in escenarios]
+
+    # --- cargas factoriales por regresion (IPC y USDMXN) ----------------
+    par = pd.concat([d["rend_port"], d["rend_bench"], d["rend_fx"]],
+                    axis=1, join="inner").dropna()
+    par.columns = ["p", "b", "f"]
+    b_ipc = b_fx = np.nan
+    if len(par) > 40:
+        Xm = np.column_stack([np.ones(len(par)), par["b"], par["f"]])
+        coef, *_ = np.linalg.lstsq(Xm, par["p"].values, rcond=None)
+        b_ipc, b_fx = float(coef[1]), float(coef[2])
+    factores = [
+        ("Mercado (β IPC)", b_ipc),
+        ("USD/MXN (β FX)", b_fx),
+        ("β bajista", d["ext"]["beta_bajista"]),
+        ("Correlación IPC", riesgo["correlacion"]),
+    ]
+    factores = [(n_, v) for n_, v in factores if v == v]
+    fmax = max(abs(v) for _, v in factores) or 1.0
+    factors = [dict(name=n_, valF=f"{v:+.2f}",
+                    wpos=f"{v / fmax * 100:.0f}" if v > 0 else 0,
+                    wneg=f"{abs(v) / fmax * 100:.0f}" if v < 0 else 0,
+                    color="var(--brand-lite)" if v >= 0 else "var(--warn)")
+               for n_, v in factores]
+
+    # --- drawdown real ----------------------------------------------------
+    serie = an.serie_valor_portafolio(d["ha"], d["val"]).tail(180)
+    dd = (serie / serie.cummax() - 1.0).values * 100.0
+    n = len(dd)
+    min_dd = float(dd.min())
+    lo2 = min(-10.0, min_dd * 1.12)
+    W, H, padT, padB = 1000, 170, 8, 6
+    Xd = lambda i: f"{i / (n - 1) * W:.1f}"
+    Yd = lambda v: f"{padT + (0 - v) / (0 - lo2) * (H - padT - padB):.1f}"
+    linea = " ".join(f"{Xd(i)},{Yd(v)}" for i, v in enumerate(dd))
+    path = f"M0,{Yd(0)} {linea} L{W},{Yd(0)} Z"
+
+    return dict(hist=hist, stress=stress, factors=factors,
+                ddLine=linea, ddPath=path, ddMinF=f"{min_dd:.1f} %",
+                ddZeroY=Yd(0))
+
+
+def _atribucion_periodos(d: dict) -> dict:
+    """Brinson-Fachler real para los cuatro periodos del selector."""
+    out = {}
+    for etiqueta, ses in [("1 mes", 21), ("3 meses", 63),
+                          ("6 meses", 126), ("12 meses", 252)]:
+        bs = bmk.sectores_benchmark(d["bench_df"], d["historico"], ses)
+        bf = an.brinson_fachler(d["val"], d["historico"], bs, ses)
+        tabla = [[_ui(SECTOR_UI, t.sector),
+                  round(t.w_p_pct, 1), round(t.w_b_pct, 1),
+                  round(t.asignacion_pp, 2), round(t.seleccion_pp, 2),
+                  round(t.interaccion_pp, 2), round(t.total_pp, 2)]
+                 for t in bf["tabla"].itertuples()]
+        out[etiqueta] = dict(
+            r_b=round(bf["r_b"], 2), r_p=round(bf["r_p"], 2),
+            asig=round(bf["asignacion"], 2), sel=round(bf["seleccion"], 2),
+            inter=round(bf["interaccion"], 2), activo=round(bf["activo"], 2),
+            tabla=tabla)
+    return out
+
+
+def _correlaciones(d: dict) -> tuple[list, list]:
+    corr = an.matriz_correlacion(d["ha"], d["val"], top=8)
+    if not len(corr):
+        return [], []
+    etiquetas = [str(c).split(" ")[0][:5] for c in corr.columns]
+    filas = []
+    for i, lab in enumerate(etiquetas):
+        celdas = []
+        for j in range(len(etiquetas)):
+            v = float(corr.iloc[i, j])
+            celdas.append(dict(
+                v=f"{v:.2f}",
+                bg=f"rgba(144,133,233,{0.1 + max(v, 0) * 0.7:.2f})",
+                txt="#fff" if v > 0.6 else "var(--ink2)"))
+        filas.append(dict(label=lab, cells=celdas))
+    return etiquetas, filas
+
+
+def _operaciones(res) -> list:
+    ops = []
+    for _, o in res.bitacora.iterrows():
+        f = o["fecha"]
+        etiqueta = f"{f.day} {MES_UI[f.month]}" if f is not None and f == f else "—"
+        ops.append([etiqueta, "C" if o["operacion"] == "Compra" else "V",
+                    o["emisora"], float(o["titulos"]), float(o["precio"])])
+    return ops
+
+
+def _hallazgos(d: dict) -> list:
+    estilo = {"critico": ("‼", "var(--neg)"),
+              "atencion": ("▲", "var(--warn)"),
+              "favorable": ("✓", "var(--pos)")}
+    tecnicos = mk.indicadores_tecnicos(d["ha"])
+    lista = an.diagnostico(d["val"], d["riesgo"], d["conc"], tecnicos,
+                           d["rpos"], d["resumen"]["peso_efectivo_pct"])
+    out = []
+    for h in lista[:6]:
+        icono, color = estilo.get(h["severidad"], ("•", "var(--ink2)"))
+        out.append(dict(icon=icono, color=color,
+                        titulo=h["titulo"], detalle=h["detalle"]))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Inyeccion
+# --------------------------------------------------------------------------
+
+def _sub(html: str, ancla: str, nuevo: str) -> str:
+    n = html.count(ancla)
+    assert n == 1, f"Ancla {ancla[:60]!r} aparece {n} veces (se esperaba 1)"
+    return html.replace(ancla, nuevo)
+
+
+def _sub_re(html: str, patron: str, nuevo: str) -> str:
+    rx = re.compile(patron, re.S)
+    encontrados = rx.findall(html)
+    assert len(encontrados) == 1, \
+        f"Patron {patron[:60]!r}: {len(encontrados)} coincidencias"
+    return rx.sub(lambda _m: nuevo, html, count=1)
+
+
+def inyectar(html: str, d: dict) -> str:
+    val, res, resumen = d["val"], d["res"], d["resumen"]
+    riesgo, ext, conc, fx = d["riesgo"], d["ext"], d["conc"], d["fx"]
+
+    # --- 1. datos semilla -------------------------------------------------
+    html = _sub_re(html, r"SEED = \[.*?\];", f"SEED = {js(_seed(val))};")
+    html = _sub(html, "EFECTIVO = 23_640_000;",
+                f"EFECTIVO = {res.efectivo!r};")
+
+    # --- 2. KPIs de cabecera ---------------------------------------------
+    twr_txt = (f"TWR {d['twr']:+.2f} %" if d["twr"] is not None else "TWR —")
+    ipc_txt = (f"IPC {d['ipc_per']:+.2f} %" if d["ipc_per"] is not None else "")
+    html = _sub(html, "delta: 'vs IPC +7.10 %'",
+                f"delta: {js(twr_txt + ' · ' + ipc_txt)}")
+
+    alpha = riesgo["alpha_anual"]
+    col_a = "var(--pos)" if alpha >= 0 else "var(--neg)"
+    html = _sub(
+        html,
+        "{ label: 'Alpha anual', value: '+3.4 %', delta: 'Jensen · vs IPC', color: 'var(--pos)' },",
+        f"{{ label: 'Alpha anual', value: {js(f'{alpha:+.1f} %')}, "
+        f"delta: 'Jensen · vs IPC', color: '{col_a}' }},")
+
+    var95_txt = js(f"{riesgo['var_95']:+.2f} %")
+    var95_frac = abs(riesgo["var_95"]) / 100.0
+    html = _sub(
+        html,
+        "{ label: 'VaR 95% diario', value: '-1.62 %', delta: this.fM(valorInstr * 0.0162), color: 'var(--neg)' },",
+        f"{{ label: 'VaR 95% diario', value: {var95_txt}, "
+        f"delta: this.fM(valorInstr * {var95_frac:.6f}), color: 'var(--neg)' }},")
+
+    sharpe_txt = js(f"{riesgo['sharpe']:.2f}")
+    beta_vol_txt = js(f"β {riesgo['beta']:.2f} · vol {riesgo['vol_anual']:.1f} %")
+    html = _sub(
+        html,
+        "{ label: 'Sharpe / Beta', value: '1.34', delta: 'β 0.92 · vol 12.8 %', color: 'var(--ink2)' },",
+        f"{{ label: 'Sharpe / Beta', value: {sharpe_txt}, "
+        f"delta: {beta_vol_txt}, color: 'var(--ink2)' }},")
+
+    # --- 3. bloques de riesgo --------------------------------------------
+    def _t(label, value, note, color):
+        return dict(label=label, value=value, note=note, color=color)
+
+    def _f2(v, suf="", signo=True, dec=2):
+        if v != v:
+            return "—"
+        return f"{v:+.{dec}f}{suf}" if signo else f"{v:.{dec}f}{suf}"
+
+    resumen_risk = [
+        _t("Volatilidad", _f2(riesgo["vol_anual"], " %", False, 1), "anual", "var(--ink)"),
+        _t("Sharpe", _f2(riesgo["sharpe"], "", False), f"Cetes {d['tasa_libre']:.1%}", "var(--ink)"),
+        _t("Beta vs IPC", _f2(riesgo["beta"], "", False), "", "var(--ink)"),
+        _t("Caída máxima", _f2(riesgo["max_drawdown"], " %", True, 1), "", "var(--neg)"),
+        _t("Pos. efectivas", _f2(conc["n_efectivo"], "", False, 1),
+           f"top 5: {conc['top5_pct']:.0f}%", "var(--ink)"),
+        _t("Herfindahl", f"{conc['hhi']:,.0f}", "0–10,000", "var(--ink)"),
+    ]
+    html = _sub_re(html, r"const resumenRisk = \[.*?\];",
+                   f"const resumenRisk = {js(resumen_risk)};")
+
+    risk_tiles = [
+        _t("Volatilidad", _f2(riesgo["vol_anual"], " %", False, 1), "anual 252d", "var(--ink)"),
+        _t("Sharpe", _f2(riesgo["sharpe"], "", False), "", "var(--ink)"),
+        _t("Sortino", _f2(riesgo["sortino"], "", False), "", "var(--ink)"),
+        _t("Beta", _f2(riesgo["beta"], "", False), "vs IPC", "var(--ink)"),
+        _t("Alfa anual", _f2(alpha, " %", True, 1), "",
+           "var(--pos)" if alpha >= 0 else "var(--neg)"),
+        _t("Tracking error", _f2(riesgo["tracking_error"], " %", False, 1), "", "var(--ink)"),
+        _t("Info ratio", _f2(riesgo["info_ratio"], "", False), "", "var(--ink)"),
+        _t("VaR 95%", _f2(riesgo["var_95"], " %"), "hist. diario", "var(--neg)"),
+        _t("VaR 99%", _f2(riesgo["var_99"], " %"), "", "var(--neg)"),
+        _t("CVaR 95%", _f2(riesgo["cvar_95"], " %"), "cola media", "var(--neg)"),
+        _t("Caída máxima", _f2(riesgo["max_drawdown"], " %", True, 1), "", "var(--neg)"),
+        _t("Treynor", _f2(ext["treynor"], "", False), "exc./beta", "var(--ink)"),
+        _t("Calmar", _f2(ext["calmar"], "", False), "rend/DD", "var(--ink)"),
+        _t("M²", _f2(ext["m2"], " %", True, 1), "a vol IPC",
+           "var(--pos)" if ext["m2"] == ext["m2"] and ext["m2"] >= 0 else "var(--neg)"),
+        _t("Captura ↑", _f2(ext["captura_alcista"], " %", False, 0), "días + IPC", "var(--ink)"),
+        _t("Captura ↓", _f2(ext["captura_bajista"], " %", False, 0), "menor mejor", "var(--ink)"),
+        _t("Hit ratio", _f2(ext["hit_ratio"], " %", False, 0), "días +", "var(--ink)"),
+        _t("Asimetría", _f2(ext["asimetria"]), "", "var(--ink)"),
+        _t("Curtosis", _f2(ext["curtosis"]), "colas", "var(--ink)"),
+        _t("Top 10", _f2(conc["top10_pct"], " %", False, 1), "concentración", "var(--ink)"),
+    ]
+    html = _sub_re(html, r"const riskTiles = \[.*?\];",
+                   f"const riskTiles = {js(risk_tiles)};")
+
+    # peso vs contribucion al riesgo (contribucion marginal real)
+    rpos = d["rpos"].head(8)
+    max_rw = float(max(rpos["peso_pct"].max(),
+                       rpos["contrib_riesgo_pct"].max())) * 1.15
+    risk_weight = [dict(name=str(r.emisora), pesoF=f"{r.peso_pct:.1f}%",
+                        riskF=f"{r.contrib_riesgo_pct:.1f}%",
+                        wPeso=round(r.peso_pct / max_rw * 100, 1),
+                        wRisk=round(r.contrib_riesgo_pct / max_rw * 100, 1))
+                   for r in rpos.itertuples()]
+    html = _sub_re(html, r"const riskTop = rows\.slice\(0, 8\);.*?\}\);",
+                   f"const riskWeight = {js(risk_weight)};")
+
+    # dispersion vol individual vs rendimiento (real)
+    disp = d["val"].merge(d["rpos"][["ticker", "vol_individual_pct"]],
+                          on="ticker", how="inner")
+    vmin, vmax = disp["vol_individual_pct"].min(), disp["vol_individual_pct"].max()
+    rmin, rmax = disp["rend_pct"].min(), disp["rend_pct"].max()
+    dv = (vmax - vmin) or 1.0
+    dr = (rmax - rmin) or 1.0
+    scatter = [dict(cx=f"{30 + (r.vol_individual_pct - vmin) / dv * 360:.0f}",
+                    cy=f"{185 - (r.rend_pct - rmin) / dr * 170:.0f}",
+                    r=f"{3 + np.sqrt(r.peso_pct) * 3.4:.1f}",
+                    color="var(--brand-lite)" if r.rend_pct >= 0 else "var(--neg)")
+               for r in disp.itertuples()]
+    html = _sub_re(html, r"const scatter = rows\.map\(r => \{.*?\}\);",
+                   f"const scatter = {js(scatter)};")
+
+    # correlaciones reales
+    etiquetas, corr_rows = _correlaciones(d)
+    html = _sub_re(html, r"const corrLabelsFull = .*?\}\)\);",
+                   f"const corrLabelsFull = {js(etiquetas)}; "
+                   f"const corrRows = {js(corr_rows)};")
+
+    # --- 4. atribucion por periodo (el selector se vuelve funcional) -----
+    periodos = _atribucion_periodos(d)
+    html = _sub(
+        html,
+        "const r_b = 3.11, asig = 0.18, sel = 1.28, inter = 0.25, r_p = 4.82, activo = 1.71;",
+        f"const _A = ({js(periodos)})[this.state.period]; "
+        "const r_b=_A.r_b, asig=_A.asig, sel=_A.sel, inter=_A.inter, "
+        "r_p=_A.r_p, activo=_A.activo;")
+    html = _sub_re(html, r"const attrData = \[.*?\];",
+                   "const attrData = _A.tabla;")
+    html = _sub(html, "const scale = 170 / 6;",
+                "const scale = 170 / Math.max(6, Math.abs(r_p) * 1.25, "
+                "Math.abs(r_b) * 1.25, Math.abs(r_b + asig) * 1.25, "
+                "Math.abs(r_b + asig + sel) * 1.25);")
+    html = _sub(html, "value: '+' + activo.toFixed(2) + ' pp', note: '', color: 'var(--pos)' }",
+                "value: (activo >= 0 ? '+' : '') + activo.toFixed(2) + ' pp', note: '', color: this.col(activo) }")
+    html = _sub(html, "value: '+' + asig.toFixed(2) + ' pp'",
+                "value: (asig >= 0 ? '+' : '') + asig.toFixed(2) + ' pp'")
+    html = _sub(html, "value: '+' + sel.toFixed(2) + ' pp'",
+                "value: (sel >= 0 ? '+' : '') + sel.toFixed(2) + ' pp'")
+    html = _sub(html, "value: '+' + inter.toFixed(2) + ' pp'",
+                "value: (inter >= 0 ? '+' : '') + inter.toFixed(2) + ' pp'")
+    # La cascada tambien anteponia '+' fijo a cada tramo; con efectos
+    # negativos producia etiquetas como '+-14.96'.
+    html = _sub(html,
+                ": '+' + (w.end - w.start).toFixed(2)",
+                ": ((w.end - w.start) >= 0 ? '+' : '') + (w.end - w.start).toFixed(2)")
+
+    # --- 5. liquidez y operaciones ---------------------------------------
+    html = _sub(html, "this.fM(31_196_000)", f"this.fM({res.flujo_ventas!r})")
+    html = _sub(html, "this.fM(-46_734_000)", f"this.fM({-res.flujo_compras!r})")
+    html = _sub(html, "this.fMoney(-31_172)", f"this.fMoney({-res.costos_totales!r})")
+    html = _sub(html, "this.fM(1_284_000)", f"this.fM({res.realizado!r})")
+    html = _sub_re(html, r"const OPS = \[.*?\];",
+                   f"const OPS = {js(_operaciones(res))};")
+
+    # --- 6. graficas precalculadas ---------------------------------------
+    chart = _grafica_desempeno(d["ha"], val, d["bench_hist"])
+    html = _sub(html, "const chart = this.buildChart();",
+                f"const chart = {js(chart)};")
+    html = _sub(html, "const risk = this.buildRisk(valorInstr);",
+                f"const risk = {js(_bloque_riesgo(d))};")
+
+    # --- 7. diagnostico ---------------------------------------------------
+    html = _sub_re(html, r"const hallazgos = \[.*?\];",
+                   f"const hallazgos = {js(_hallazgos(d))};")
+
+    # --- 8. sello de fecha/hora en la cabecera ---------------------------
+    ahora = datetime.now()
+    html = _sub(html, "21 jul 2026",
+                f"{ahora.day} {MES_UI[ahora.month].lower()} {ahora.year}")
+    html = re.sub(r"14:32:\d{2}", ahora.strftime("%H:%M:%S"), html, count=1)
+
+    return html
+
+
+def html_con_datos_reales(ruta_html: Path | None = None) -> str:
+    ruta = ruta_html or (Path(__file__).parent / "dashboard_baz.html")
+    html = ruta.read_text(encoding="utf-8")
+    return inyectar(html, calcular())

@@ -38,7 +38,24 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-HTML = (Path(__file__).parent / "dashboard_baz.html").read_text(encoding="utf-8")
+@st.cache_data(ttl=300, show_spinner="Calculando el portafolio con precios de mercado…")
+def _html_real() -> str:
+    """
+    HTML del tablero con los datos reales inyectados: mismo pipeline que
+    app.py (posición + boletas + precios vivos + analítica). Se memoriza
+    5 minutos para no golpear a Yahoo en cada interacción.
+    """
+    import datos_reales
+    return datos_reales.html_con_datos_reales()
+
+
+try:
+    HTML = _html_real()
+except Exception as e:  # sin red o pipeline roto: mejor ejemplo visible que error
+    HTML = (Path(__file__).parent / "dashboard_baz.html").read_text(encoding="utf-8")
+    st.warning(
+        f"No fue posible calcular los datos reales ({type(e).__name__}: {e}). "
+        f"Se muestra el tablero con datos de ejemplo. Pulsa R para reintentar.")
 
 # El tablero ocupa 100vh internamente; el iframe le fija la altura y su propio
 # scroll interno se encarga del contenido que exceda la ventana.
