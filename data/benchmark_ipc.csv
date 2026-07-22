@@ -1,0 +1,34 @@
+emisora,ticker,sector,peso_pct
+AMX B,AMXB.MX,Telecomunicaciones,14.0
+WALMEX *,WALMEX.MX,Consumo Basico,10.5
+FEMSA UBD,FEMSAUBD.MX,Consumo Basico,10.0
+GFNORTE O,GFNORTEO.MX,Financiero,9.5
+GMEXICO B,GMEXICOB.MX,Materiales,8.0
+CEMEX CPO,CEMEXCPO.MX,Materiales,5.0
+GAP B,GAPB.MX,Industriales,3.6
+ASUR B,ASURB.MX,Industriales,3.2
+AC *,AC.MX,Consumo Basico,3.0
+BIMBO A,BIMBOA.MX,Consumo Basico,2.4
+KOF UBL,KOFUBL.MX,Consumo Basico,2.2
+GRUMA B,GRUMAB.MX,Consumo Basico,2.0
+KIMBER A,KIMBERA.MX,Consumo Basico,2.0
+OMA B,OMAB.MX,Industriales,1.6
+GCARSO A1,GCARSOA1.MX,Industriales,1.6
+PINFRA *,PINFRA.MX,Industriales,1.6
+PE&OLES *,PE&OLES.MX,Materiales,1.4
+GENTERA *,GENTERA.MX,Financiero,1.1
+VESTA *,VESTA.MX,Inmobiliario,1.1
+ORBIA *,ORBIA.MX,Materiales,1.0
+TLEVISA CPO,TLEVISACPO.MX,Telecomunicaciones,1.0
+MEGA CPO,MEGACPO.MX,Telecomunicaciones,1.0
+CUERVO *,CUERVO.MX,Consumo Basico,1.0
+LIVEPOL C-1,LIVEPOLC-1.MX,Consumo Discrecional,1.0
+CHDRAUI B,CHDRAUIB.MX,Consumo Basico,1.0
+BBAJIO O,BBAJIOO.MX,Financiero,1.0
+Q *,Q.MX,Financiero,1.0
+RA *,RA.MX,Financiero,1.0
+FUNO 11,FUNO11.MX,Inmobiliario,0.8
+ALSEA *,ALSEA.MX,Consumo Discrecional,0.8
+BOLSA A,BOLSAA.MX,Financiero,0.5
+LAB B,LABB.MX,Salud,0.5
+VOLAR A,VOLARA.MX,Industriales,0.3

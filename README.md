@@ -17,8 +17,9 @@ atribución, riesgo y diagnóstico que se presenta al cliente.
 | **Efectivo** | Deriva el saldo de los flujos de compra y venta, con comisión e IVA |
 | **Valuación** | Precios en vivo de las 30 emisoras vía Yahoo Finance |
 | **Segmentación** | Sector, industria, región, clase de activo, mercado y divisa |
-| **Riesgo** | Volatilidad, Sharpe, Sortino, beta, VaR/CVaR, drawdown, correlaciones |
-| **Atribución** | Contribución al resultado por dimensión y por emisora |
+| **Riesgo** | Volatilidad, Sharpe, Sortino, beta, VaR/CVaR (histórico y paramétrico), drawdown, Treynor, Calmar, M², capturas alcista/bajista, beta bajista, hit ratio, asimetría/curtosis, vol y beta móviles, correlaciones |
+| **Rendimiento** | TWR real del periodo reconstruyendo la tenencia de cada día (valores + liquidez, sin flujos externos) |
+| **Atribución** | Brinson-Fachler contra el S&P/BMV IPC (asignación + selección + interacción = retorno activo, identidad exacta) sobre un benchmark reconstruido a nivel constituyente con pesos editables en `data/benchmark_ipc.csv`; más contribución por dimensión y por emisora |
 | **Diagnóstico** | Reglas de mesa que señalan qué está funcionando y qué no |
 | **Captura** | Alta de operaciones desde la propia interfaz |
 

@@ -17,6 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from portfolio import analytics as an
+from portfolio import benchmark as bm
 from portfolio import engine as eng
 from portfolio import loader as ld
 from portfolio import market as mk
@@ -48,7 +49,7 @@ TOKENS = {
       --positivo:#22c55e; --negativo:#ef4444;
       --positivo-marca:#0ca30c; --negativo-marca:#d03b3b;
       --alerta:#fab219; --serio:#ec835a;
-      --grad-cabecera:#17111f;
+      --grad-cabecera:#17111f; --sombra:0 1px 3px rgba(0,0,0,0.35);
       --sello-vivo-bg:rgba(12,163,12,0.16); --sello-est-bg:rgba(250,178,25,0.16);
       --sello-marca-bg:rgba(144,133,233,0.16);
       --mono:'JetBrains Mono','IBM Plex Mono','SF Mono',Consolas,monospace;
@@ -62,7 +63,7 @@ TOKENS = {
       --positivo:#006300; --negativo:#b3281e;
       --positivo-marca:#0ca30c; --negativo-marca:#d03b3b;
       --alerta:#8a5c00; --serio:#b34a22;
-      --grad-cabecera:#efe7f7;
+      --grad-cabecera:#efe7f7; --sombra:0 1px 3px rgba(23,22,31,0.07);
       --sello-vivo-bg:rgba(12,163,12,0.10); --sello-est-bg:rgba(138,92,0,0.10);
       --sello-marca-bg:rgba(82,45,109,0.08);
       --mono:'JetBrains Mono','IBM Plex Mono','SF Mono',Consolas,monospace;
@@ -88,7 +89,10 @@ def tema_activo() -> str:
 
 def cargar_estilos(modo: str) -> None:
     css = (ASSETS / "styles.css").read_text(encoding="utf-8")
-    st.markdown("<style>:root{" + TOKENS[modo] + "}\n" + css + "</style>",
+    fuentes = ("@import url('https://fonts.googleapis.com/css2"
+               "?family=Inter:wght@400;500;600;700"
+               "&family=JetBrains+Mono:wght@400;500;600&display=swap');")
+    st.markdown("<style>" + fuentes + ":root{" + TOKENS[modo] + "}\n" + css + "</style>",
                 unsafe_allow_html=True)
 
 
@@ -495,7 +499,7 @@ def pestana_segmentacion(val, efectivo):
 
 
 def pestana_riesgo(val, hist, bench_hist, riesgo, conc, riesgo_pos, tecnicos,
-                   sin_historico):
+                   sin_historico, ext, moviles):
     panel("Métricas de riesgo", f"{riesgo['sesiones']} sesiones · anualizado 252d")
 
     if sin_historico:
@@ -526,6 +530,51 @@ def pestana_riesgo(val, hist, bench_hist, riesgo, conc, riesgo_pos, tecnicos,
         tarjeta("Concentración top 10", pct(conc["top10_pct"], 1, False)),
     ], columnas=6)
 
+    def _n(v, dec=2):
+        return f"{v:+.{dec}f}" if v == v else "—"
+
+    panel("Métricas extendidas",
+          "rendimiento ajustado por riesgo y comportamiento en colas")
+    tira([
+        tarjeta("Treynor", _n(ext["treynor"]), nota="exceso por unidad de beta"),
+        tarjeta("Calmar", _n(ext["calmar"]), nota="rend. / caída máxima"),
+        tarjeta("M²", pct(ext["m2"], 1),
+                nota="rend. a la volatilidad del IPC"),
+        tarjeta("Captura alcista", pct(ext["captura_alcista"], 0, False),
+                nota="vs días positivos del IPC"),
+        tarjeta("Captura bajista", pct(ext["captura_bajista"], 0, False),
+                nota="menor es mejor"),
+        tarjeta("Beta bajista", _n(ext["beta_bajista"]),
+                nota="sólo días negativos del IPC"),
+        tarjeta("Hit ratio", pct(ext["hit_ratio"], 0, False),
+                nota="días positivos"),
+    ], columnas=7)
+    tira([
+        tarjeta("Mejor día", pct(ext["mejor_dia"], 2),
+                clase_delta=clase(ext["mejor_dia"])),
+        tarjeta("Peor día", pct(ext["peor_dia"], 2),
+                clase_delta=clase(ext["peor_dia"])),
+        tarjeta("Asimetría", _n(ext["asimetria"]),
+                nota="<0 sesga a pérdidas"),
+        tarjeta("Curtosis", _n(ext["curtosis"]),
+                nota="exceso; >0 colas gordas"),
+        tarjeta("VaR 95 % paramétrico", pct(ext["var_param_95"], 2),
+                nota="supuesto normal, vs histórico"),
+    ], columnas=5)
+
+    izq_m, der_m = st.columns(2)
+    with izq_m:
+        panel("Volatilidad móvil", "30 sesiones, anualizada")
+        st.plotly_chart(
+            viz.linea_movil(moviles["vol"], "Volatilidad anualizada (%)"),
+            width="stretch", config={"displayModeBar": False})
+    with der_m:
+        panel("Beta móvil vs IPC", "60 sesiones · referencia en 1.0")
+        st.plotly_chart(
+            viz.linea_movil(moviles["beta"], "Beta",
+                            color=viz.CATEGORICA[5], referencia=1.0),
+            width="stretch", config={"displayModeBar": False})
+
     izq, der = st.columns([1.15, 1])
     with izq:
         panel("Peso vs contribución al riesgo",
@@ -548,7 +597,78 @@ def pestana_riesgo(val, hist, bench_hist, riesgo, conc, riesgo_pos, tecnicos,
                     width="stretch", config={"displayModeBar": False})
 
 
-def pestana_atribucion(val, tecnicos):
+def pestana_atribucion(val, tecnicos, historico, bench_df):
+    def pp(v):
+        return f"{v:+.2f} pp" if v == v else "—"
+
+    panel("Atribución Brinson-Fachler vs S&P/BMV IPC",
+          "asignación + selección + interacción = retorno activo")
+    per = st.radio("Periodo de atribución",
+                   ["1 mes", "3 meses", "6 meses", "12 meses"],
+                   horizontal=True, index=1, label_visibility="collapsed")
+    ses = {"1 mes": 21, "3 meses": 63, "6 meses": 126, "12 meses": 252}[per]
+
+    bs = bm.sectores_benchmark(bench_df, historico, ses)
+    bf = an.brinson_fachler(val, historico, bs, ses)
+
+    if not len(bf["tabla"]):
+        st.info("Histórico insuficiente para la atribución en este periodo.")
+    else:
+        ipc_obs = bm.rendimiento_periodo(historico, BENCHMARK_TICKER, ses)
+        tira([
+            tarjeta("Portafolio", pct(bf["r_p"]), clase_delta=clase(bf["r_p"]),
+                    nota=f"rendimiento {per}"),
+            tarjeta("Benchmark reconstruido", pct(bf["r_b"]),
+                    nota=(f"IPC observado {pct(ipc_obs * 100)}"
+                          if ipc_obs is not None else "")),
+            tarjeta("Retorno activo", pp(bf["activo"]),
+                    clase_delta=clase(bf["activo"])),
+            tarjeta("Asignación", pp(bf["asignacion"]),
+                    clase_delta=clase(bf["asignacion"]),
+                    nota="sobre/subponderar sectores"),
+            tarjeta("Selección", pp(bf["seleccion"]),
+                    clase_delta=clase(bf["seleccion"]),
+                    nota="elegir dentro del sector"),
+            tarjeta("Interacción", pp(bf["interaccion"]),
+                    clase_delta=clase(bf["interaccion"])),
+        ], columnas=6)
+
+        izq_a, der_a = st.columns([1, 1.25])
+        with izq_a:
+            panel("Descomposición del retorno activo", per)
+            st.plotly_chart(viz.cascada_atribucion(bf),
+                            width="stretch", config={"displayModeBar": False})
+        with der_a:
+            panel("Efecto total por sector", "pp de retorno activo")
+            st.plotly_chart(
+                viz.barras_contribucion(bf["tabla"], "sector", "total_pp",
+                                        "Efecto total (pp)", formato="pp",
+                                        n=12, altura=360),
+                width="stretch", config={"displayModeBar": False})
+
+        panel("Detalle por sector", "pesos y rendimientos del periodo")
+        st.dataframe(
+            bf["tabla"], width="stretch", hide_index=True,
+            column_config={
+                "sector": st.column_config.TextColumn("Sector", width="medium"),
+                "fuera_indice": st.column_config.CheckboxColumn("Fuera de índice"),
+                "w_p_pct": st.column_config.NumberColumn("Peso port.", format="%.1f %%"),
+                "w_b_pct": st.column_config.NumberColumn("Peso bench.", format="%.1f %%"),
+                "r_p_pct": st.column_config.NumberColumn("Rend. port.", format="%+.2f %%"),
+                "r_b_pct": st.column_config.NumberColumn("Rend. bench.", format="%+.2f %%"),
+                "asignacion_pp": st.column_config.NumberColumn("Asignación", format="%+.2f pp"),
+                "seleccion_pp": st.column_config.NumberColumn("Selección", format="%+.2f pp"),
+                "interaccion_pp": st.column_config.NumberColumn("Interacción", format="%+.2f pp"),
+                "total_pp": st.column_config.NumberColumn("Total", format="%+.2f pp"),
+            })
+        st.caption(
+            f"Benchmark reconstruido con {len(bench_df)} constituyentes del IPC y "
+            f"pesos aproximados de free-float, editables en data/benchmark_ipc.csv "
+            f"(refrescar con el factsheet de S&P tras cada rebalanceo). La identidad "
+            f"de Brinson cierra contra el benchmark reconstruido, no contra el nivel "
+            f"del ^MXX; la diferencia entre ambos es error de reconstrucción. Pesos "
+            f"del portafolio al cierre y rendimientos a títulos constantes.")
+
     dim = st.radio("Atribuir por", ["sector", "region", "clase_activo", "industria"],
                    horizontal=True, format_func=str.capitalize,
                    label_visibility="collapsed")
@@ -775,7 +895,7 @@ habilidad del gestor y es lo que exige GIPS para presentar cifras a un cliente
 institucional; el MWR (TIR) mide lo que efectivamente gano el cliente. La
 diferencia entre ambos cuantifica si el *timing* de las entradas sumo o resto.
 
-**2. Atribucion de Brinson-Fachler contra el IPC.**
+**2. Atribución de Brinson-Fachler contra el IPC — ya implementada en la pestaña Atribución.**
 Separar el resultado en efecto asignacion (pesar de mas o de menos un sector),
 efecto seleccion (elegir bien dentro del sector) e interaccion. Es la respuesta
 directa a *que esta funcionando*: permite decir si el valor viene de la vision
@@ -894,7 +1014,10 @@ def main() -> None:
     tickers = tuple(t for t in res.posiciones["ticker"] if t)
     with st.spinner("Consultando precios de mercado…"):
         vigentes = mk.precios_vigentes(tickers)
-        historico = mk.descargar_historico(tickers + (BENCHMARK_TICKER,),
+        bench_df = bm.cargar_benchmark()
+        universo = tuple(dict.fromkeys(
+            tickers + bm.tickers_benchmark(bench_df) + (BENCHMARK_TICKER,)))
+        historico = mk.descargar_historico(universo,
                                            dias=int(cfg["ventana"] * 1.5))
         fx_dato = mk.tipo_de_cambio(FX_TICKER)
 
@@ -914,6 +1037,11 @@ def main() -> None:
         rend_bench = np.log(bench_hist / bench_hist.shift(1)).dropna()
 
     riesgo = an.metricas_riesgo(rend_port, rend_bench, cfg["tasa_libre"])
+    vol_bench = (float(rend_bench.std(ddof=1) * np.sqrt(252))
+                 if rend_bench is not None and len(rend_bench) > 2 else None)
+    ext = an.metricas_extendidas(rend_port, rend_bench, cfg["tasa_libre"],
+                                 riesgo["beta"], vol_bench)
+    moviles = an.series_moviles(rend_port, rend_bench)
     conc = an.metricas_concentracion(val)
     riesgo_pos = an.descomposicion_riesgo(hist_activos, val)
     tecnicos = mk.indicadores_tecnicos(hist_activos) if len(hist_activos) else pd.DataFrame()
@@ -922,23 +1050,50 @@ def main() -> None:
     hallazgos = an.diagnostico(val, riesgo, conc, tecnicos, riesgo_pos,
                                resumen["peso_efectivo_pct"])
 
+    # Serie real del mandato (tenencia de cada dia, valores + liquidez).
+    # Sin flujos externos, el rendimiento del periodo es un TWR legitimo.
+    sv_real = an.serie_valor_real(historico, base.df, res.bitacora,
+                                  cfg["efectivo_inicial"], cfg["fecha_base"])
+    twr_periodo = ipc_periodo = None
+    if len(sv_real) >= 2 and sv_real.iloc[0]:
+        twr_periodo = float(sv_real.iloc[-1] / sv_real.iloc[0] - 1.0) * 100.0
+    if bench_hist is not None and len(bench_hist):
+        b_per = bench_hist[bench_hist.index >= pd.Timestamp(cfg["fecha_base"])]
+        if len(b_per) >= 2 and b_per.iloc[0]:
+            ipc_periodo = float(b_per.iloc[-1] / b_per.iloc[0] - 1.0) * 100.0
+
     # --- Encabezado -------------------------------------------------------
     sello_precio = "—"
     if len(vigentes) and vigentes["fecha_precio"].notna().any():
         sello_precio = pd.to_datetime(
             vigentes["fecha_precio"].max()).strftime("%d %b %Y")
 
+    chips = [f'<span class="chip {clase(resumen["pnl_dia"])}">'
+             f'Hoy {pct(resumen["var_dia_pct"])}</span>']
+    if twr_periodo is not None:
+        chips.append(f'<span class="chip {clase(twr_periodo)}">'
+                     f'Periodo {pct(twr_periodo)}</span>')
+    if ipc_periodo is not None:
+        chips.append(f'<span class="chip neutro">IPC {pct(ipc_periodo)}</span>')
+
     st.markdown(
         f'<div class="cabecera">'
+        f'<div style="display:flex;align-items:center;gap:1.15rem">'
         f'<div class="cabecera-logo">{logo_svg(46, modo)}</div>'
-        f'<div style="text-align:right">'
+        f'<div>'
         f'<div class="cabecera-titulo">Portafolio de Inversión BAZ</div>'
         f'<div class="cabecera-sub">'
         f'Contrato 104351 · Posición base {base.fecha:%d %b %Y} · '
         f'Precios al {sello_precio} · '
-        f'USDMXN {fx_dato["valor"]:,.4f} · '
-        f'Cifras en MXN · Consulta {datetime.now():%d %b %Y %H:%M}'
-        f'</div></div></div>',
+        f'USDMXN {fx_dato["valor"]:,.4f} · Cifras en MXN · '
+        f'Consulta {datetime.now():%d %b %Y %H:%M}'
+        f'</div></div></div>'
+        f'<div style="text-align:right">'
+        f'<div class="kpi-etiqueta" style="justify-content:flex-end">'
+        f'Valor total del portafolio</div>'
+        f'<div class="hero-valor">{millones(resumen["valor_total"])}</div>'
+        f'<div class="chips">{"".join(chips)}</div>'
+        f'</div></div>',
         unsafe_allow_html=True)
 
     # --- Indicadores de cabecera ------------------------------------------
@@ -947,8 +1102,12 @@ def main() -> None:
     et_real = ("Utilidad realizada" if resumen["realizado"] >= 0
                else "Pérdida realizada")
     tira([
-        tarjeta("Valor total del portafolio", millones(resumen["valor_total"]),
-                nota=f"{resumen['n_posiciones']} posiciones + liquidez"),
+        tarjeta("Rendimiento del periodo (TWR)",
+                pct(twr_periodo) if twr_periodo is not None else "—",
+                (f"IPC {pct(ipc_periodo)}" if ipc_periodo is not None else ""),
+                clase(twr_periodo),
+                nota=f"desde {cfg['fecha_base']:%d %b} · "
+                     f"{resumen['n_posiciones']} posiciones"),
         tarjeta("Posición en valores", millones(resumen["valor_instrumentos"])),
         tarjeta("Costo de adquisición", millones(resumen["costo_total"])),
         tarjeta(et_no_real, millones(resumen["no_realizado"]),
@@ -978,9 +1137,9 @@ def main() -> None:
         pestana_segmentacion(val, res.efectivo)
     with tabs[3]:
         pestana_riesgo(val, hist_activos, bench_hist, riesgo, conc,
-                       riesgo_pos, tecnicos, sin_historico)
+                       riesgo_pos, tecnicos, sin_historico, ext, moviles)
     with tabs[4]:
-        pestana_atribucion(val, tecnicos)
+        pestana_atribucion(val, tecnicos, historico, bench_df)
     with tabs[5]:
         pestana_efectivo(res, resumen, fx, cfg["fecha_base"])
     with tabs[6]:

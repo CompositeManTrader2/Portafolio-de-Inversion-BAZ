@@ -515,3 +515,64 @@ def dispersion_riesgo_rendimiento(valuada: pd.DataFrame, tecnicos: pd.DataFrame,
         margin=dict(l=6, r=14, t=12, b=8),
     )
     return fig
+
+
+# --------------------------------------------------------------------------
+# Atribucion
+# --------------------------------------------------------------------------
+
+def cascada_atribucion(bf: dict, altura: int = 360) -> go.Figure:
+    """
+    Cascada de Brinson-Fachler: asignacion + seleccion + interaccion suman
+    exactamente el retorno activo, y la cascada hace visible esa identidad.
+    """
+    if not bf or bf.get("activo") != bf.get("activo"):
+        return _vacio("Sin datos suficientes para la atribucion")
+
+    valores = [bf["asignacion"], bf["seleccion"], bf["interaccion"]]
+    fig = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["relative", "relative", "relative", "total"],
+        x=["Asignación", "Selección", "Interacción", "Retorno activo"],
+        y=valores + [0.0],
+        text=[f"{v:+.2f}" for v in valores + [bf["activo"]]],
+        textposition="outside",
+        textfont=dict(family=MONO, size=11, color=TINTA_2),
+        connector=dict(line=dict(color=BORDE, width=1)),
+        increasing=dict(marker=dict(color=POSITIVO)),
+        decreasing=dict(marker=dict(color=NEGATIVO)),
+        totals=dict(marker=dict(color=MARCA_CLARA)),
+        hovertemplate="<b>%{x}</b><br>%{y:+.2f} pp<extra></extra>",
+    ))
+    fig.add_hline(y=0, line=dict(color=TINTA_3, width=1))
+    fig.update_layout(
+        height=altura, showlegend=False,
+        yaxis=dict(title="Puntos porcentuales", ticksuffix=" pp", showgrid=True),
+        xaxis=dict(showgrid=False),
+        margin=dict(l=6, r=14, t=26, b=8),
+    )
+    return fig
+
+
+def linea_movil(serie: pd.Series, titulo_eje: str, color: str | None = None,
+                referencia: float | None = None,
+                altura: int = 300) -> go.Figure:
+    """Serie movil (volatilidad o beta) con linea de referencia opcional."""
+    if serie is None or len(serie) < 5:
+        return _vacio("Historico insuficiente para la serie movil")
+
+    fig = go.Figure(go.Scatter(
+        x=serie.index, y=serie.values, mode="lines",
+        line=dict(color=color or CATEGORICA[0], width=2),
+        hovertemplate="%{x|%d %b %Y}<br>" + titulo_eje + "  %{y:.2f}<extra></extra>",
+    ))
+    if referencia is not None:
+        fig.add_hline(y=referencia,
+                      line=dict(color=TINTA_3, width=1, dash="dash"))
+    fig.update_layout(
+        height=altura, hovermode="x unified",
+        yaxis=dict(title=titulo_eje, showgrid=True),
+        xaxis=dict(showgrid=False),
+        margin=dict(l=6, r=14, t=12, b=8),
+    )
+    return fig

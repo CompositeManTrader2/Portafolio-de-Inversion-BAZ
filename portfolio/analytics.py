@@ -449,3 +449,251 @@ def matriz_correlacion(historico: pd.DataFrame, valuada: pd.DataFrame,
     corr.index = [etiquetas.get(t, t) for t in corr.index]
     corr.columns = [etiquetas.get(t, t) for t in corr.columns]
     return corr
+
+
+# --------------------------------------------------------------------------
+# Atribucion Brinson-Fachler
+# --------------------------------------------------------------------------
+
+def brinson_fachler(valuada: pd.DataFrame, historico: pd.DataFrame,
+                    bench_sectores: pd.DataFrame,
+                    sesiones: int) -> dict:
+    """
+    Atribucion del retorno activo contra el benchmark, por sector, con la
+    descomposicion de Brinson-Fachler:
+
+      Asignacion_i  = (w_p_i - w_b_i) x (r_b_i - r_B)
+      Seleccion_i   =  w_b_i x (r_p_i - r_b_i)
+      Interaccion_i = (w_p_i - w_b_i) x (r_p_i - r_b_i)
+
+    donde r_B es el retorno del benchmark reconstruido. Con esa definicion la
+    identidad  suma de efectos = r_p - r_B  cierra de forma exacta.
+
+    Convenciones para casos frontera:
+      - Sector del portafolio ausente del benchmark (posiciones SIC/US):
+        apuesta fuera de indice -> todo el efecto es asignacion,
+        w_p_i x (r_p_i - r_B). Seleccion e interaccion son cero.
+      - Sector del benchmark no tenido: asignacion -w_b_i x (r_b_i - r_B).
+
+    Limitaciones declaradas: pesos del portafolio al cierre (no promedio del
+    periodo) y rendimientos a titulos constantes. Ambas se documentan en la
+    interfaz; con pocos dias de historia de operaciones son de segundo orden.
+    """
+    if not len(valuada) or not len(historico) or not len(bench_sectores):
+        return dict(tabla=pd.DataFrame(), r_p=np.nan, r_b=np.nan,
+                    activo=np.nan, asignacion=np.nan, seleccion=np.nan,
+                    interaccion=np.nan, sesiones=0)
+
+    # --- rendimiento del periodo por posicion del portafolio --------------
+    rends = {}
+    for _, fila in valuada.iterrows():
+        t = fila["ticker"]
+        if t not in historico.columns:
+            continue
+        s = historico[t].dropna().tail(sesiones + 1)
+        if len(s) >= 2 and s.iloc[0]:
+            rends[t] = float(s.iloc[-1] / s.iloc[0] - 1.0)
+
+    port = valuada[valuada["ticker"].isin(rends)].copy()
+    if not len(port):
+        return dict(tabla=pd.DataFrame(), r_p=np.nan, r_b=np.nan,
+                    activo=np.nan, asignacion=np.nan, seleccion=np.nan,
+                    interaccion=np.nan, sesiones=0)
+    port["r"] = port["ticker"].map(rends)
+    port["w"] = port["valor_mercado"] / port["valor_mercado"].sum()
+
+    p_sec = (port.groupby("sector")
+             .apply(lambda g: pd.Series({
+                 "w_p": g["w"].sum(),
+                 "r_p": float((g["w"] * g["r"]).sum() / g["w"].sum()),
+             }), include_groups=False)
+             .reset_index())
+
+    b_sec = bench_sectores.rename(columns={"peso_pct": "w_b",
+                                           "rendimiento_pct": "r_b"}).copy()
+    b_sec["w_b"] = b_sec["w_b"] / 100.0
+    b_sec["r_b"] = b_sec["r_b"] / 100.0
+
+    m = p_sec.merge(b_sec[["sector", "w_b", "r_b"]], on="sector", how="outer")
+    m[["w_p", "w_b"]] = m[["w_p", "w_b"]].fillna(0.0)
+
+    r_B = float((m["w_b"] * m["r_b"].fillna(0.0)).sum())
+    r_p = float((m["w_p"] * m["r_p"].fillna(0.0)).sum())
+
+    filas = []
+    for _, x in m.iterrows():
+        w_p, w_b = float(x["w_p"]), float(x["w_b"])
+        r_p_i = x["r_p"] if x["r_p"] == x["r_p"] else None
+        r_b_i = x["r_b"] if x["r_b"] == x["r_b"] else None
+        fuera = r_b_i is None or w_b == 0.0
+
+        if fuera and r_p_i is not None:
+            asig, sel, inter = w_p * (r_p_i - r_B), 0.0, 0.0
+        elif r_p_i is None:                 # sector del indice no tenido
+            asig, sel, inter = -w_b * (r_b_i - r_B), 0.0, 0.0
+        else:
+            asig = (w_p - w_b) * (r_b_i - r_B)
+            sel = w_b * (r_p_i - r_b_i)
+            inter = (w_p - w_b) * (r_p_i - r_b_i)
+
+        filas.append(dict(
+            sector=x["sector"], fuera_indice=fuera and r_p_i is not None,
+            w_p_pct=w_p * 100.0, w_b_pct=w_b * 100.0,
+            r_p_pct=(r_p_i * 100.0) if r_p_i is not None else np.nan,
+            r_b_pct=(r_b_i * 100.0) if r_b_i is not None else np.nan,
+            asignacion_pp=asig * 100.0, seleccion_pp=sel * 100.0,
+            interaccion_pp=inter * 100.0,
+            total_pp=(asig + sel + inter) * 100.0,
+        ))
+
+    tabla = (pd.DataFrame(filas)
+             .sort_values("total_pp", key=lambda s: s.abs(), ascending=False)
+             .reset_index(drop=True))
+
+    return dict(
+        tabla=tabla,
+        r_p=r_p * 100.0, r_b=r_B * 100.0, activo=(r_p - r_B) * 100.0,
+        asignacion=float(tabla["asignacion_pp"].sum()),
+        seleccion=float(tabla["seleccion_pp"].sum()),
+        interaccion=float(tabla["interaccion_pp"].sum()),
+        sesiones=sesiones,
+    )
+
+
+# --------------------------------------------------------------------------
+# Metricas extendidas de riesgo y rendimiento
+# --------------------------------------------------------------------------
+
+def metricas_extendidas(rend_port: pd.Series, rend_bench: pd.Series | None,
+                        tasa_libre_anual: float = 0.09,
+                        beta: float = np.nan,
+                        vol_bench_anual: float | None = None) -> dict:
+    """
+    Segundo bloque de metricas institucionales sobre rendimientos diarios:
+    Treynor, Calmar, M2, capturas alcista/bajista, beta bajista, hit ratio,
+    mejor/peor dia, asimetria, curtosis y VaR parametrico.
+    """
+    vacio = dict(treynor=np.nan, calmar=np.nan, m2=np.nan,
+                 captura_alcista=np.nan, captura_bajista=np.nan,
+                 beta_bajista=np.nan, hit_ratio=np.nan,
+                 mejor_dia=np.nan, peor_dia=np.nan,
+                 asimetria=np.nan, curtosis=np.nan, var_param_95=np.nan)
+    if rend_port is None or len(rend_port) < 20:
+        return vacio
+
+    rl = rend_port.dropna()
+    r = np.expm1(rl)                        # simples para capturas y ratios
+    rf = tasa_libre_anual
+    rend_anual = float(np.expm1(rl.mean() * SESIONES_ANIO))
+    vol = float(rl.std(ddof=1) * np.sqrt(SESIONES_ANIO))
+
+    acum = np.exp(rl.cumsum())
+    max_dd = abs(float((acum / acum.cummax() - 1.0).min()))
+
+    m = dict(
+        treynor=((rend_anual - rf) / beta) if beta == beta and beta else np.nan,
+        calmar=(rend_anual / max_dd) if max_dd else np.nan,
+        m2=np.nan,
+        captura_alcista=np.nan, captura_bajista=np.nan, beta_bajista=np.nan,
+        hit_ratio=float((r > 0).mean() * 100.0),
+        mejor_dia=float(r.max() * 100.0),
+        peor_dia=float(r.min() * 100.0),
+        asimetria=float(rl.skew()),
+        curtosis=float(rl.kurtosis()),
+        var_param_95=float((rl.mean() - 1.645 * rl.std(ddof=1)) * 100.0),
+    )
+
+    if rend_bench is not None and len(rend_bench) >= 20:
+        par = pd.concat([rl, rend_bench], axis=1, join="inner").dropna()
+        par.columns = ["p", "b"]
+        if len(par) >= 20:
+            simples = np.expm1(par)
+            sube = simples[simples["b"] > 0]
+            baja = simples[simples["b"] < 0]
+            if len(sube) and sube["b"].mean():
+                m["captura_alcista"] = float(sube["p"].mean() / sube["b"].mean() * 100.0)
+            if len(baja) and baja["b"].mean():
+                m["captura_bajista"] = float(baja["p"].mean() / baja["b"].mean() * 100.0)
+            if len(baja) > 5 and baja["b"].var():
+                m["beta_bajista"] = float(baja.cov().iloc[0, 1] / baja["b"].var())
+            if vol_bench_anual:
+                sharpe = (rend_anual - rf) / vol if vol else np.nan
+                if sharpe == sharpe:
+                    m["m2"] = float((rf + sharpe * vol_bench_anual) * 100.0)
+    return m
+
+
+def series_moviles(rend_port: pd.Series, rend_bench: pd.Series | None,
+                   ventana_vol: int = 30, ventana_beta: int = 60) -> dict:
+    """Volatilidad anualizada movil y beta movil contra el benchmark."""
+    out = dict(vol=pd.Series(dtype=float), beta=pd.Series(dtype=float))
+    if rend_port is None or len(rend_port) < ventana_vol + 5:
+        return out
+    r = rend_port.dropna()
+    out["vol"] = (r.rolling(ventana_vol).std(ddof=1)
+                  * np.sqrt(SESIONES_ANIO) * 100.0).dropna()
+    if rend_bench is not None and len(rend_bench) >= ventana_beta + 5:
+        par = pd.concat([r, rend_bench], axis=1, join="inner").dropna()
+        par.columns = ["p", "b"]
+        cov = par["p"].rolling(ventana_beta).cov(par["b"])
+        var = par["b"].rolling(ventana_beta).var()
+        out["beta"] = (cov / var).dropna()
+    return out
+
+
+# --------------------------------------------------------------------------
+# Serie real del portafolio (tenencia de cada dia, no la actual)
+# --------------------------------------------------------------------------
+
+def serie_valor_real(historico: pd.DataFrame, base: pd.DataFrame,
+                     bitacora: pd.DataFrame, efectivo_inicial: float,
+                     fecha_base) -> pd.Series:
+    """
+    Valor diario del portafolio COMPLETO (valores + liquidez) reconstruyendo
+    la tenencia vigente en cada fecha desde la posicion base.
+
+    Como las operaciones son internas (la liquidez absorbe cada compra y
+    venta), el valor total no tiene flujos externos, y el rendimiento del
+    periodo es directamente V_final / V_inicial - 1: un TWR legitimo, a
+    diferencia de la serie a titulos constantes que se usa para riesgo.
+    """
+    if not len(base) or not len(historico):
+        return pd.Series(dtype=float)
+
+    fechas = historico.index[historico.index >= pd.Timestamp(fecha_base)]
+    if not len(fechas):
+        return pd.Series(dtype=float)
+
+    from .taxonomy import ticker_de
+
+    tenencia = {r["ticker"]: float(r["titulos"])
+                for _, r in base.iterrows() if r["ticker"]}
+    movs = (bitacora.dropna(subset=["fecha"]).sort_values("fecha")
+            .to_dict("records") if len(bitacora) else [])
+
+    valores = {}
+    efectivo = efectivo_inicial
+    i = 0
+    for fecha in fechas:
+        while i < len(movs) and pd.Timestamp(movs[i]["fecha"]) <= fecha:
+            op = movs[i]
+            t = ticker_de(op["emisora"])
+            if t:
+                q = float(op["titulos"])
+                delta = q if op["operacion"] == "Compra" else -q
+                tenencia[t] = tenencia.get(t, 0.0) + delta
+            efectivo += float(op["efecto_caja"])
+            i += 1
+        fila = historico.loc[fecha]
+        total, precio_completo = efectivo, True
+        for t, q in tenencia.items():
+            if abs(q) < 1e-9:
+                continue
+            p = fila.get(t)
+            if p is None or pd.isna(p):
+                precio_completo = False
+                continue
+            total += q * float(p)
+        if precio_completo:
+            valores[fecha] = total
+    return pd.Series(valores).sort_index()
