@@ -12,10 +12,16 @@ El tablero maneja su propio layout, scroll, tema claro/oscuro y navegación;
 aquí solo se sirve a pantalla completa dentro de Streamlit.
 """
 
+import sys
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+# Ejecutable tanto directo (streamlit run deploy/streamlit_dashboard.py) como
+# via el punto de entrada raiz (streamlit_app.py): datos_reales vive junto a
+# este archivo y debe ser importable en ambos casos.
+sys.path.insert(0, str(Path(__file__).parent))
 
 st.set_page_config(
     page_title="Portafolio BAZ | Punto Casa de Bolsa",
