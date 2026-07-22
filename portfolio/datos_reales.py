@@ -813,11 +813,28 @@ def _js_plano(v) -> str:
 # completa gana ficha al pasar el cursor.
 
 def _tabla_posiciones(html: str) -> str:
-    # ---- datos: campos nuevos en posRows ---------------------------------
+    # ---- busqueda: el input del template no tenia binding ----------------
+    # El filtro busca en emisora, sector, industria y mercado, sin distinguir
+    # mayusculas. La barra de magnitud se escala sobre TODAS las filas, no
+    # sobre las filtradas, para que no cambie de escala al teclear.
+    html = _sub(html,
+        "tab: 'resumen', light: false, seg: 'sector', period: '3 meses',",
+        "tab: 'resumen', light: false, seg: 'sector', period: '3 meses', filtro: '',")
+    html = _sub(html,
+        "segTabs, segLabel: segMap[this.state.seg], segBars, segRows,",
+        "filtro: this.state.filtro, "
+        "setFiltro: e => this.setState({ filtro: e.target.value }), "
+        "segTabs, segLabel: segMap[this.state.seg], segBars, segRows,")
+
+    # ---- datos: filtrado + campos nuevos en posRows ----------------------
     html = _sub(html,
         "const posRows = rows.map(r => ({",
+        "const filtro = (this.state.filtro || '').trim().toLowerCase(); "
+        "const rowsFiltradas = filtro ? rows.filter(r => "
+        "(r.emisora + ' ' + r.sector + ' ' + r.industria + ' ' + r.mercado)"
+        ".toLowerCase().includes(filtro)) : rows; "
         "const maxAbsRend = Math.max(...rows.map(r => Math.abs(r.rend))) || 1; "
-        "const posRows = rows.map(r => ({")
+        "const posRows = rowsFiltradas.map(r => ({")
     html = _sub(html,
         "varDia: this.fPct(r.vd), varColor: this.col(r.vd),",
         "varDia: this.fPct(r.vd), varColor: this.col(r.vd), "
@@ -862,6 +879,13 @@ def _tabla_posiciones(html: str) -> str:
         '<span style=\\"font-family:var(--mono);font-weight:600;min-width:64px;'
         'color:{{ r.rendColor }}\\">{{ r.rend }}<\\u002Fspan>'
         '<\\u002Fdiv><\\u002Fsc-raw-td>')
+
+    # ---- binding del input de busqueda -----------------------------------
+    html = _sub(html,
+        '<input placeholder=\\"Filtrar emisora…\\" style=',
+        '<input placeholder=\\"Filtrar emisora…\\" value=\\"{{ filtro }}\\" '
+        'sc-camel-on-input=\\"{{ setFiltro }}\\" '
+        'sc-camel-on-change=\\"{{ setFiltro }}\\" style=')
 
     # ---- ficha de la fila al pasar el cursor -----------------------------
     html = _sub(html,
