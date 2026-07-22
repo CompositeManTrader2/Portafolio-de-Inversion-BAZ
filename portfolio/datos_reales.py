@@ -204,10 +204,16 @@ def _grafica_desempeno(ha, val, bench_hist, n_max: int = 180) -> dict:
     x_ticks = [dict(label=f"{MES_UI[idx[i].month]} {idx[i].year}",
                     x=f"{X(i):.1f}") for i in posiciones]
 
-    return dict(portPoints=pts(p), ipcPoints=pts(b),
-                yTicks=y_ticks, xTicks=x_ticks,
-                endX=f"{X(n-1):.1f}", portEndY=f"{Y(p[-1]):.1f}",
-                ipcEndY=f"{Y(b[-1]):.1f}")
+    chart = dict(portPoints=pts(p), ipcPoints=pts(b),
+                 yTicks=y_ticks, xTicks=x_ticks,
+                 endX=f"{X(n-1):.1f}", portEndY=f"{Y(p[-1]):.1f}",
+                 ipcEndY=f"{Y(b[-1]):.1f}")
+
+    # Serie para el crosshair del runtime de tooltips: un texto por sesion.
+    tips = [f"{f.day} {MES_UI[f.month]} {f.year}|Portafolio {v:.2f}|IPC {w:.2f}"
+            for f, v, w in zip(idx, p, b)]
+    serie_hover = dict(W=1000, padL=46, padR=66, n=n, tips=tips)
+    return chart, serie_hover
 
 
 def _bloque_riesgo(d: dict) -> dict:
@@ -230,7 +236,10 @@ def _bloque_riesgo(d: dict) -> dict:
         color = ("var(--neg)" if x <= var99 else
                  "color-mix(in srgb, var(--neg) 55%, transparent)" if x <= var95
                  else "var(--brand-med)" if x < 0 else "var(--brand-lite)")
-        hist.append(dict(h=f"{c / mx * 100:.0f}", color=color))
+        hist.append(dict(
+            h=f"{c / mx * 100:.0f}", color=color,
+            tip=(f"{bordes[i]*100:+.2f} % a {bordes[i+1]*100:+.2f} %"
+                 f"|{int(c)} sesiones")))
 
     # --- escenarios parametricos con las sensibilidades reales -----------
     beta = riesgo["beta"] if riesgo["beta"] == riesgo["beta"] else 1.0
@@ -246,7 +255,9 @@ def _bloque_riesgo(d: dict) -> dict:
     smax = max(abs(v) for _, v in escenarios)
     stress = [dict(name=n_, pct=f"{v:+.1f} %", monto=_fM(valor_instr * v / 100),
                    w=f"{abs(v) / smax * 100:.0f}",
-                   color="var(--pos)" if v >= 0 else "var(--neg)")
+                   color="var(--pos)" if v >= 0 else "var(--neg)",
+                   tip=(f"{n_}|Impacto {v:+.1f} % del patrimonio"
+                        f"|{_fM(valor_instr * v / 100)}"))
               for n_, v in escenarios]
 
     # --- cargas factoriales por regresion (IPC y USDMXN) ----------------
@@ -269,7 +280,8 @@ def _bloque_riesgo(d: dict) -> dict:
     factors = [dict(name=n_, valF=f"{v:+.2f}",
                     wpos=f"{v / fmax * 100:.0f}" if v > 0 else 0,
                     wneg=f"{abs(v) / fmax * 100:.0f}" if v < 0 else 0,
-                    color="var(--brand-lite)" if v >= 0 else "var(--warn)")
+                    color="var(--brand-lite)" if v >= 0 else "var(--warn)",
+                    tip=f"{n_}|Carga {v:+.2f}")
                for n_, v in factores]
 
     # --- drawdown real ----------------------------------------------------
@@ -284,9 +296,14 @@ def _bloque_riesgo(d: dict) -> dict:
     linea = " ".join(f"{Xd(i)},{Yd(v)}" for i, v in enumerate(dd))
     path = f"M0,{Yd(0)} {linea} L{W},{Yd(0)} Z"
 
-    return dict(hist=hist, stress=stress, factors=factors,
-                ddLine=linea, ddPath=path, ddMinF=f"{min_dd:.1f} %",
-                ddZeroY=Yd(0))
+    bloque = dict(hist=hist, stress=stress, factors=factors,
+                  ddLine=linea, ddPath=path, ddMinF=f"{min_dd:.1f} %",
+                  ddZeroY=Yd(0))
+    idx = serie.index
+    tips_dd = [f"{f.day} {MES_UI[f.month]} {f.year}|Caída {v:.2f} %"
+               for f, v in zip(idx, dd)]
+    serie_dd = dict(W=1000, padL=0, padR=0, n=n, tips=tips_dd)
+    return bloque, serie_dd
 
 
 def _atribucion_periodos(d: dict) -> dict:
@@ -313,7 +330,8 @@ def _correlaciones(d: dict) -> tuple[list, list]:
     corr = an.matriz_correlacion(d["ha"], d["val"], top=8)
     if not len(corr):
         return [], []
-    etiquetas = [str(c).split(" ")[0][:5] for c in corr.columns]
+    nombres = [str(c) for c in corr.columns]
+    etiquetas = [nom.split(" ")[0][:5] for nom in nombres]
     filas = []
     for i, lab in enumerate(etiquetas):
         celdas = []
@@ -322,7 +340,8 @@ def _correlaciones(d: dict) -> tuple[list, list]:
             celdas.append(dict(
                 v=f"{v:.2f}",
                 bg=f"rgba(144,133,233,{0.1 + max(v, 0) * 0.7:.2f})",
-                txt="#fff" if v > 0.6 else "var(--ink2)"))
+                txt="#fff" if v > 0.6 else "var(--ink2)",
+                tip=f"{nombres[i]} vs {nombres[j]}|Correlación {v:+.2f}"))
         filas.append(dict(label=lab, cells=celdas))
     return etiquetas, filas
 
@@ -356,9 +375,9 @@ def _hallazgos(d: dict) -> list:
 # Inyeccion
 # --------------------------------------------------------------------------
 
-def _sub(html: str, ancla: str, nuevo: str) -> str:
+def _sub(html: str, ancla: str, nuevo: str, veces: int = 1) -> str:
     n = html.count(ancla)
-    assert n == 1, f"Ancla {ancla[:60]!r} aparece {n} veces (se esperaba 1)"
+    assert n == veces, f"Ancla {ancla[:60]!r} aparece {n} veces (se esperaba {veces})"
     return html.replace(ancla, nuevo)
 
 
@@ -464,7 +483,10 @@ def inyectar(html: str, d: dict) -> str:
     risk_weight = [dict(name=str(r.emisora), pesoF=f"{r.peso_pct:.1f}%",
                         riskF=f"{r.contrib_riesgo_pct:.1f}%",
                         wPeso=round(r.peso_pct / max_rw * 100, 1),
-                        wRisk=round(r.contrib_riesgo_pct / max_rw * 100, 1))
+                        wRisk=round(r.contrib_riesgo_pct / max_rw * 100, 1),
+                        tip=(f"{r.emisora}|Peso {r.peso_pct:.2f} %"
+                             f"|Contribución al riesgo {r.contrib_riesgo_pct:.2f} %"
+                             f"|Riesgo/peso {r.riesgo_sobre_peso:.2f}x"))
                    for r in rpos.itertuples()]
     html = _sub_re(html, r"const riskTop = rows\.slice\(0, 8\);.*?\}\);",
                    f"const riskWeight = {js(risk_weight)};")
@@ -479,7 +501,10 @@ def inyectar(html: str, d: dict) -> str:
     scatter = [dict(cx=f"{30 + (r.vol_individual_pct - vmin) / dv * 360:.0f}",
                     cy=f"{185 - (r.rend_pct - rmin) / dr * 170:.0f}",
                     r=f"{3 + np.sqrt(r.peso_pct) * 3.4:.1f}",
-                    color="var(--brand-lite)" if r.rend_pct >= 0 else "var(--neg)")
+                    color="var(--brand-lite)" if r.rend_pct >= 0 else "var(--neg)",
+                    tip=(f"{r.emisora}|Volatilidad {r.vol_individual_pct:.1f} %"
+                         f"|Rendimiento {r.rend_pct:+.2f} %"
+                         f"|Peso {r.peso_pct:.2f} %"))
                for r in disp.itertuples()]
     html = _sub_re(html, r"const scatter = rows\.map\(r => \{.*?\}\);",
                    f"const scatter = {js(scatter)};")
@@ -512,11 +537,7 @@ def inyectar(html: str, d: dict) -> str:
                 "value: (sel >= 0 ? '+' : '') + sel.toFixed(2) + ' pp'")
     html = _sub(html, "value: '+' + inter.toFixed(2) + ' pp'",
                 "value: (inter >= 0 ? '+' : '') + inter.toFixed(2) + ' pp'")
-    # La cascada tambien anteponia '+' fijo a cada tramo; con efectos
-    # negativos producia etiquetas como '+-14.96'.
-    html = _sub(html,
-                ": '+' + (w.end - w.start).toFixed(2)",
-                ": ((w.end - w.start) >= 0 ? '+' : '') + (w.end - w.start).toFixed(2)")
+
 
     # --- 5. liquidez y operaciones ---------------------------------------
     html = _sub(html, "this.fM(31_196_000)", f"this.fM({res.flujo_ventas!r})")
@@ -527,23 +548,257 @@ def inyectar(html: str, d: dict) -> str:
                    f"const OPS = {js(_operaciones(res))};")
 
     # --- 6. graficas precalculadas ---------------------------------------
-    chart = _grafica_desempeno(d["ha"], val, d["bench_hist"])
+    chart, serie_perf = _grafica_desempeno(d["ha"], val, d["bench_hist"])
     html = _sub(html, "const chart = this.buildChart();",
                 f"const chart = {js(chart)};")
+    bloque_riesgo, serie_dd = _bloque_riesgo(d)
     html = _sub(html, "const risk = this.buildRisk(valorInstr);",
-                f"const risk = {js(_bloque_riesgo(d))};")
+                f"const risk = {js(bloque_riesgo)};")
 
     # --- 7. diagnostico ---------------------------------------------------
     html = _sub_re(html, r"const hallazgos = \[.*?\];",
                    f"const hallazgos = {js(_hallazgos(d))};")
 
-    # --- 8. sello de fecha/hora en la cabecera ---------------------------
+    # --- 8. capa interactiva: tooltips y crosshair ------------------------
+    html = _capa_interactiva(html, d, serie_perf, serie_dd)
+
+    # --- 9. sello de fecha/hora en la cabecera ---------------------------
     ahora = datetime.now()
     html = _sub(html, "21 jul 2026",
                 f"{ahora.day} {MES_UI[ahora.month].lower()} {ahora.year}")
     html = re.sub(r"14:32:\d{2}", ahora.strftime("%H:%M:%S"), html, count=1)
 
     return html
+
+
+# --------------------------------------------------------------------------
+# Capa interactiva: tooltips en cada elemento y crosshair en las lineas
+# --------------------------------------------------------------------------
+# El tablero es HTML/SVG estatico y no traia informacion al pasar el cursor.
+# Esta capa agrega (1) atributos data-tip en el template, ligados a campos
+# `tip` que se anaden a cada dato, y (2) un runtime delegado que muestra un
+# tooltip siguiendo al cursor y un crosshair con fecha y valores sobre las
+# graficas de linea. El runtime va en el documento exterior, fuera del
+# bundle, por lo que sobrevive a los re-renders del componente.
+
+def _capa_interactiva(html: str, d: dict, serie_perf: dict,
+                      serie_dd: dict) -> str:
+    # ---- 1. atributos data-tip en el template (marcado escapado) ---------
+    plantilla = [
+        # treemap: mosaico por emisora y cabecera de sector
+        ('<div style=\\"{{ t.stl }}\\">',
+         '<div data-tip=\\"{{ t.tip }}\\" style=\\"{{ t.stl }}\\">', 1),
+        ('<div style=\\"{{ sec.headerStl }}\\">',
+         '<div data-tip=\\"{{ sec.tip }}\\" style=\\"{{ sec.headerStl }}\\">', 1),
+        # barras de contribucion (rendimiento y dia comparten marcado)
+        ('<div style=\\"display:flex;align-items:center;gap:8px;margin-bottom:4px\\">',
+         '<div data-tip=\\"{{ c.tip }}\\" style=\\"display:flex;align-items:center;gap:8px;margin-bottom:4px\\">', 2),
+        # asignacion por dimension
+        ('<div style=\\"display:flex;align-items:center;gap:10px;margin-bottom:11px\\">',
+         '<div data-tip=\\"{{ b.tip }}\\" style=\\"display:flex;align-items:center;gap:10px;margin-bottom:11px\\">', 1),
+        # dispersion riesgo-rendimiento
+        ('<circle cx=\\"{{ p.cx }}\\"',
+         '<circle data-tip=\\"{{ p.tip }}\\" cx=\\"{{ p.cx }}\\"', 1),
+        # celdas de correlacion
+        (';margin:1px\\">', ';margin:1px\\" data-tip=\\"{{ cell.tip }}\\">', 1),
+        # escenarios de estres
+        ('gap:10px;margin-bottom:9px\\">',
+         'gap:10px;margin-bottom:9px\\" data-tip=\\"{{ s.tip }}\\">', 1),
+        # cargas factoriales
+        ('gap:8px;margin-bottom:7px\\">',
+         'gap:8px;margin-bottom:7px\\" data-tip=\\"{{ f.tip }}\\">', 1),
+        # histograma de rendimientos
+        ('border-radius:2px 2px 0 0;min-height:2px\\">',
+         'border-radius:2px 2px 0 0;min-height:2px\\" data-tip=\\"{{ b.tip }}\\">', 1),
+        # peso vs contribucion al riesgo
+        ('gap:8px;margin-bottom:8px\\">',
+         'gap:8px;margin-bottom:8px\\" data-tip=\\"{{ r.tip }}\\">', 1),
+        # cascada de atribucion
+        ('flex:1;height:100%;position:relative\\">',
+         'flex:1;height:100%;position:relative\\" data-tip=\\"{{ w.tip }}\\">', 1),
+        # flujo diario de liquidez
+        ('justify-content:center;position:relative\\">',
+         'justify-content:center;position:relative\\" data-tip=\\"{{ f.tip }}\\">', 1),
+        # lineas con crosshair
+        ('points=\\"{{ chart.portPoints }}\\"',
+         'data-chart=\\"perf\\" points=\\"{{ chart.portPoints }}\\"', 1),
+        ('points=\\"{{ risk.ddLine }}\\"',
+         'data-chart=\\"dd\\" points=\\"{{ risk.ddLine }}\\"', 1),
+    ]
+    for ancla, nuevo, veces in plantilla:
+        html = _sub(html, ancla, nuevo, veces)
+
+    # ---- 2. campos tip en los datos que construye el propio componente ---
+    html = _sub(html,
+        "const all = rows.map(r => ({ name: r.emisora, val: getter(r) / base * 100 }));",
+        "const all = rows.map(r => ({ name: r.emisora, val: getter(r) / base * 100, raw: getter(r) }));")
+    html = _sub(html,
+        "const bars = top.map(c => ({ name: c.name, valF: this.fPct(c.val), color: this.col(c.val),",
+        "const bars = top.map(c => ({ name: c.name, valF: this.fPct(c.val), color: this.col(c.val), "
+        "tip: c.name + '|Contribuci\\u00f3n ' + this.fPct(c.val) + ' pp|' + this.fMoney(c.raw),")
+    html = _sub(html,
+        "const segBars = segG.map((g, i) => ({ name: g.name, pesoF: g.peso.toFixed(1) + '%',",
+        "const segBars = segG.map((g, i) => ({ name: g.name, pesoF: g.peso.toFixed(1) + '%', "
+        "tip: g.name + '|' + this.fM(g.valor) + ' \\u00b7 ' + g.peso.toFixed(2) + ' %|P&L ' + this.fM(g.pnl) + ' (' + this.fPct(g.rend) + ')|' + g.n + ' posiciones',")
+    html = _sub(html,
+        ".map(r => ({ value: r.valor, emisora: r.emisora, peso: r.peso }))",
+        ".map(r => ({ value: r.valor, emisora: r.emisora, peso: r.peso, "
+        "tip: r.emisora + '|' + this.fM(r.valor) + ' \\u00b7 ' + r.peso.toFixed(2) + ' %|P&L ' + this.fM(r.pnl) + ' (' + this.fPct(r.rend) + ')|D\\u00eda ' + this.fPct(r.vd) }))")
+    html = _sub(html,
+        "secG.map(g => ({ value: g.valor, name: g.name, peso: g.peso }))",
+        "secG.map(g => ({ value: g.valor, name: g.name, peso: g.peso, "
+        "tip: g.name + '|' + this.fM(g.valor) + ' \\u00b7 ' + g.peso.toFixed(1) + ' %|P&L ' + this.fM(g.pnl) + ' (' + this.fPct(g.rend) + ')|' + g.n + ' posiciones' }))")
+    html = _sub(html,
+        "emisora: er.emisora, pesoF: er.peso.toFixed(1) + ' %',",
+        "emisora: er.emisora, pesoF: er.peso.toFixed(1) + ' %', tip: er.tip,")
+    html = _sub(html,
+        "const waterfall = wfRaw.map(w => ({ label: w.label, valF: (w.label === 'Bench.' || w.label === 'Port.') ? w.end.toFixed(2) : '+' + (w.end - w.start).toFixed(2), color: w.color, hpx: (Math.abs(w.end - w.start) * scale).toFixed(0), basepx: (Math.min(w.start, w.end) * scale).toFixed(0) }));",
+        "const waterfall = wfRaw.map(w => { const dif = w.end - w.start; "
+        "const valF = (w.label === 'Bench.' || w.label === 'Port.') ? w.end.toFixed(2) : (dif >= 0 ? '+' : '') + dif.toFixed(2); "
+        "return { label: w.label, valF, color: w.color, tip: w.label + '|' + valF + ' pp', "
+        "hpx: (Math.abs(dif) * scale).toFixed(0), basepx: (Math.min(w.start, w.end) * scale).toFixed(0) }; });")
+    html = _sub(html,
+        "const flowBars = flowArr.map(([label, v]) => ({ label: label.replace(' Jul', ''),",
+        "const flowBars = flowArr.map(([label, v]) => ({ label: label.replace(' Jul', ''), "
+        "tip: label + '|Flujo neto ' + this.fMoney(v, 2),")
+
+    # ---- 3. residuos fijos de la leyenda del template --------------------
+    riesgo = d["riesgo"]
+    ipc_chart = serie_perf["tips"][-1].split("|")[-1].replace("IPC ", "")
+    delta_ipc = float(ipc_chart) - 100.0
+    html = _sub(html, ">IPC +7.10 %<", f">IPC {delta_ipc:+.2f} %<")
+    html = _sub(html, "VaR 95 · −1.62 %",
+                f"VaR 95 · {riesgo['var_95']:.2f} %".replace("-", "−"))
+    html = _sub(html, "VaR 99 · −2.74 %",
+                f"VaR 99 · {riesgo['var_99']:.2f} %".replace("-", "−"))
+    html = _sub(html, "CVaR 95 · −2.19 %",
+                f"CVaR 95 · {riesgo['cvar_95']:.2f} %".replace("-", "−"))
+    html = _sub(html, "Activo +{{ activoF }} pp", "Activo {{ activoF }} pp")
+    html = _sub(html, '<span style=\\"color:var(--pos)\\">Activo ',
+                '<span style=\\"color:{{ activoCol }}\\">Activo ')
+    html = _sub(html, "activoF: activo.toFixed(2),",
+                "activoF: (activo >= 0 ? '+' : '') + activo.toFixed(2), "
+                "activoCol: this.col(activo),")
+
+    # ---- 4. runtime de tooltip + series para el crosshair ----------------
+    series = ("<script>window.__SERIES__ = "
+              + _js_plano(dict(perf=serie_perf, dd=serie_dd))
+              + ";</script>")
+    runtime = """
+<script>
+(function () {
+  var tip = document.createElement('div');
+  tip.id = 'bz-tip';
+  tip.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;' +
+    'display:none;max-width:300px;padding:7px 11px;border-radius:5px;' +
+    'font:500 11px/1.5 Inter,-apple-system,sans-serif;' +
+    'background:var(--surf2,#1c1c26);color:var(--ink,#f4f3f7);' +
+    'border:1px solid var(--border2,#3a3a4d);' +
+    'box-shadow:0 4px 16px rgba(0,0,0,.35);white-space:nowrap';
+  document.body.appendChild(tip);
+
+  function mostrar(texto, x, y) {
+    // El runtime del tablero reconstruye el body al arrancar y se lleva el
+    // div; re-adjuntarlo bajo demanda lo hace inmune a cualquier re-render.
+    if (!tip.isConnected) document.body.appendChild(tip);
+    tip.innerHTML = '';
+    texto.split('|').forEach(function (linea, i) {
+      var div = document.createElement('div');
+      div.textContent = linea.trim();
+      if (i === 0) div.style.cssText = 'font-weight:700;margin-bottom:2px';
+      tip.appendChild(div);
+    });
+    tip.style.display = 'block';
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    var nx = x + 14, ny = y + 14;
+    if (nx + w > innerWidth - 8) nx = x - w - 14;
+    if (ny + h > innerHeight - 8) ny = y - h - 14;
+    tip.style.left = nx + 'px';
+    tip.style.top = ny + 'px';
+  }
+  function ocultar() { tip.style.display = 'none'; }
+
+  var guia = null;
+  function dibujarGuia(svg, S, i) {
+    if (!guia || guia.ownerSVGElement !== svg) {
+      quitarGuia();
+      guia = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      guia.setAttribute('stroke', 'var(--ink3,#7d7a90)');
+      guia.setAttribute('stroke-width', '1');
+      guia.setAttribute('stroke-dasharray', '2 3');
+      guia.setAttribute('pointer-events', 'none');
+      svg.appendChild(guia);
+    }
+    var x = S.padL + i / (S.n - 1) * (S.W - S.padL - S.padR);
+    var vb = svg.viewBox.baseVal;
+    guia.setAttribute('x1', x); guia.setAttribute('x2', x);
+    guia.setAttribute('y1', 0); guia.setAttribute('y2', vb ? vb.height : 300);
+  }
+  function quitarGuia() {
+    if (guia && guia.parentNode) guia.parentNode.removeChild(guia);
+    guia = null;
+  }
+
+  document.addEventListener('mousemove', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (el && el.getAttribute('data-tip')) {
+      quitarGuia();
+      mostrar(el.getAttribute('data-tip'), e.clientX, e.clientY);
+      return;
+    }
+    var svg = e.target && e.target.closest ? e.target.closest('svg') : null;
+    var pl = svg ? svg.querySelector('[data-chart]') : null;
+    if (pl && window.__SERIES__) {
+      var S = window.__SERIES__[pl.getAttribute('data-chart')];
+      if (S) {
+        var r = svg.getBoundingClientRect();
+        var fx = (e.clientX - r.left) / r.width * S.W;
+        var i = Math.round((fx - S.padL) / (S.W - S.padL - S.padR) * (S.n - 1));
+        if (i >= 0 && i < S.n) {
+          mostrar(S.tips[i], e.clientX, e.clientY);
+          dibujarGuia(svg, S, i);
+          return;
+        }
+      }
+    }
+    ocultar(); quitarGuia();
+  }, true);
+  document.addEventListener('mouseleave', function () {
+    ocultar(); quitarGuia();
+  }, true);
+})();
+</script>
+"""
+    cierre = "</body>\n</html>"
+    assert html.rstrip().endswith(cierre.replace("\n", "\n")) or cierre in html[-200:], \
+        "No se encontro el cierre del documento exterior"
+    idx = html.rfind("</body>")
+    return html[:idx] + series + runtime + html[idx:]
+
+
+def _js_plano(v) -> str:
+    """
+    Serializador para el documento EXTERIOR (sin doble escape): comillas
+    simples y \\uXXXX para no-ASCII, apto para un <script> normal.
+    """
+    if isinstance(v, str):
+        cuerpo = "".join(
+            c if 32 <= ord(c) < 127 and c not in "'\\<>" else f"\\u{ord(c):04x}"
+            for c in v)
+        return f"'{cuerpo}'"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "null"
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    if isinstance(v, (float, np.floating)):
+        return repr(float(v)) if np.isfinite(v) else "0"
+    if isinstance(v, (list, tuple)):
+        return "[" + ",".join(_js_plano(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ",".join(f"{k}:{_js_plano(x)}" for k, x in v.items()) + "}"
+    raise TypeError(f"No serializable: {type(v)}")
 
 
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
