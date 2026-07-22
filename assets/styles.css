@@ -1,37 +1,11 @@
 /* =========================================================================
-   Punto Casa de Bolsa - tema terminal
-   Superficie oscura #14141b. Todos los colores de texto verificados a
-   >= 4.5:1 y los de marca a >= 3:1 sobre esa superficie.
-   El morado institucional #522D6D queda reservado para cromo (bordes,
-   bandas, acentos): a 1.71:1 nunca debe portar texto.
+   Punto Casa de Bolsa - hoja de layout
+   Los tokens de color (:root) los inyecta app.py segun el tema activo del
+   sistema (claro u oscuro); esta hoja solo consume variables. Todos los
+   tonos de texto van verificados a >= 4.5:1 y los de marca a >= 3:1 sobre
+   la superficie de su modo. En oscuro, el morado institucional #522D6D es
+   solo cromo: a 1.71:1 nunca porta texto.
    ========================================================================= */
-
-:root {
-  --plano:            #0a0a0f;
-  --superficie:       #14141b;
-  --superficie-alta:  #1c1c26;
-  --superficie-hover: #23232f;
-  --borde:            #2a2a38;
-  --borde-fuerte:     #3a3a4d;
-
-  --tinta:            #f4f3f7;
-  --tinta-2:          #a8a5b8;
-  --tinta-3:          #7d7a90;
-
-  --marca:            #522D6D;
-  --marca-clara:      #9085e9;
-  --marca-media:      #6f4bb0;
-
-  --positivo:         #22c55e;
-  --negativo:         #ef4444;
-  --positivo-marca:   #0ca30c;
-  --negativo-marca:   #d03b3b;
-  --alerta:           #fab219;
-  --serio:            #ec835a;
-
-  --mono: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
-  --sans: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif;
-}
 
 .stApp { background: var(--plano); }
 
@@ -51,7 +25,7 @@ html, body, [class*="css"], .stMarkdown, p, span, div, label {
 .cabecera {
   display: flex; align-items: center; justify-content: space-between;
   gap: 1.5rem; padding: 0.9rem 1.4rem; margin-bottom: 1.1rem;
-  background: linear-gradient(96deg, #17111f 0%, var(--superficie) 46%, var(--superficie) 100%);
+  background: linear-gradient(96deg, var(--grad-cabecera) 0%, var(--superficie) 46%, var(--superficie) 100%);
   border: 1px solid var(--borde);
   border-left: 3px solid var(--marca-media);
   border-radius: 4px;
@@ -185,9 +159,9 @@ html, body, [class*="css"], .stMarkdown, p, span, div, label {
   font-family: var(--mono); font-size: 0.6rem; font-weight: 600;
   letter-spacing: 0.06em; text-transform: uppercase;
 }
-.sello-vivo   { background: rgba(12,163,12,0.16);  color: var(--positivo); }
-.sello-est    { background: rgba(250,178,25,0.16); color: var(--alerta); }
-.sello-marca  { background: rgba(144,133,233,0.16); color: var(--marca-clara); }
+.sello-vivo   { background: var(--sello-vivo-bg);  color: var(--positivo); }
+.sello-est    { background: var(--sello-est-bg); color: var(--alerta); }
+.sello-marca  { background: var(--sello-marca-bg); color: var(--marca-clara); }
 
 #MainMenu, footer { visibility: hidden; }
 .block-container { padding-top: 2.1rem; max-width: 1500px; }

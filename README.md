@@ -130,11 +130,16 @@ data/                   Archivos de posición y boletas
 
 ## Diseño
 
-Terminal oscura sobre `#14141b` con el morado institucional `#522D6D`.
+Doble tema con el morado institucional `#522D6D`: la app sigue la preferencia
+del sistema (claro u oscuro) vía `st.context.theme` y puede fijarse manualmente
+en el menú ⋮ → *Settings* → *Appearance*. Los tokens de la interfaz, la
+plantilla de Plotly y el logotipo cambian juntos; el modo oscuro trabaja sobre
+`#14141b` y el claro sobre `#fcfcfb`.
 
-La paleta categórica es de orden fijo y está validada: banda de luminosidad,
-piso de croma, separación bajo deuteranopia y protanopia (ΔE 8.4 adyacente),
-piso de visión normal (ΔE 19.3) y contraste ≥ 3:1 en las ocho ranuras.
+La paleta categórica es de orden fijo y cada modo usa el escalón validado para
+su superficie: banda de luminosidad, piso de croma, separación bajo
+deuteranopia y protanopia (ΔE ≥ 8.4 adyacente), piso de visión normal
+(ΔE ≥ 19.3) y contraste ≥ 3:1 en las ocho ranuras.
 
 Los colores de resultado se eligieron por contraste medido, no por apariencia:
 `#22c55e` y `#ef4444` para cifras —ambos por encima de 4.5:1— mientras que los

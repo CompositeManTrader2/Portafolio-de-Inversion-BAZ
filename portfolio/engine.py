@@ -296,14 +296,28 @@ def resumen_cartera(valuada: pd.DataFrame, efectivo: float,
     )
 
 
-def serie_efectivo(bitacora: pd.DataFrame, efectivo_inicial: float) -> pd.DataFrame:
-    """Evolucion diaria del saldo de efectivo a partir de la bitacora."""
+def serie_efectivo(bitacora: pd.DataFrame, efectivo_inicial: float,
+                   fecha_inicial: date | None = None) -> pd.DataFrame:
+    """
+    Evolucion diaria del saldo de liquidez a partir de la bitacora.
+
+    Con `fecha_inicial` la serie arranca con el saldo de apertura en la fecha
+    de la posicion base; sin ella, el primer punto seria ya el saldo posterior
+    al primer dia operado y el nivel de partida no se veria en la grafica.
+    """
     if not len(bitacora) or bitacora["fecha"].isna().all():
         return pd.DataFrame({"fecha": [], "efectivo": [], "flujo": []})
 
     b = bitacora.dropna(subset=["fecha"]).copy()
     diario = b.groupby("fecha", as_index=False)["efecto_caja"].sum()
     diario = diario.rename(columns={"efecto_caja": "flujo"}).sort_values("fecha")
+
+    if fecha_inicial is not None and fecha_inicial < diario["fecha"].min():
+        diario = pd.concat([
+            pd.DataFrame([{"fecha": fecha_inicial, "flujo": 0.0}]),
+            diario,
+        ], ignore_index=True)
+
     diario["efectivo"] = efectivo_inicial + diario["flujo"].cumsum()
     return diario.reset_index(drop=True)
 

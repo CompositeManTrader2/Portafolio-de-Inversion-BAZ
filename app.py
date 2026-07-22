@@ -30,24 +30,70 @@ RAIZ = Path(__file__).parent
 ASSETS = RAIZ / "assets"
 DATOS = RAIZ / "data"
 
-st.set_page_config(page_title="Portafolio de Inversion BAZ | Punto Casa de Bolsa",
+st.set_page_config(page_title="Portafolio de Inversión BAZ | Punto Casa de Bolsa",
                    page_icon="●", layout="wide",
                    initial_sidebar_state="expanded")
-
-viz.registrar_plantilla()
 
 
 # ==========================================================================
 # Presentacion
 # ==========================================================================
 
-def cargar_estilos() -> None:
+TOKENS = {
+    "dark": """
+      --plano:#0a0a0f; --superficie:#14141b; --superficie-alta:#1c1c26;
+      --superficie-hover:#23232f; --borde:#2a2a38; --borde-fuerte:#3a3a4d;
+      --tinta:#f4f3f7; --tinta-2:#a8a5b8; --tinta-3:#7d7a90;
+      --marca:#522D6D; --marca-clara:#9085e9; --marca-media:#6f4bb0;
+      --positivo:#22c55e; --negativo:#ef4444;
+      --positivo-marca:#0ca30c; --negativo-marca:#d03b3b;
+      --alerta:#fab219; --serio:#ec835a;
+      --grad-cabecera:#17111f;
+      --sello-vivo-bg:rgba(12,163,12,0.16); --sello-est-bg:rgba(250,178,25,0.16);
+      --sello-marca-bg:rgba(144,133,233,0.16);
+      --mono:'JetBrains Mono','IBM Plex Mono','SF Mono',Consolas,monospace;
+      --sans:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;
+    """,
+    "light": """
+      --plano:#f7f6f9; --superficie:#fcfcfb; --superficie-alta:#f2f1f5;
+      --superficie-hover:#eceaf1; --borde:#e0dee8; --borde-fuerte:#c8c5d4;
+      --tinta:#17161f; --tinta-2:#4d4a5a; --tinta-3:#716e82;
+      --marca:#522D6D; --marca-clara:#5e3a86; --marca-media:#6a4390;
+      --positivo:#006300; --negativo:#b3281e;
+      --positivo-marca:#0ca30c; --negativo-marca:#d03b3b;
+      --alerta:#8a5c00; --serio:#b34a22;
+      --grad-cabecera:#efe7f7;
+      --sello-vivo-bg:rgba(12,163,12,0.10); --sello-est-bg:rgba(138,92,0,0.10);
+      --sello-marca-bg:rgba(82,45,109,0.08);
+      --mono:'JetBrains Mono','IBM Plex Mono','SF Mono',Consolas,monospace;
+      --sans:'Inter',-apple-system,'Segoe UI',Roboto,sans-serif;
+    """,
+}
+
+
+def tema_activo() -> str:
+    """
+    Modo visual resuelto por Streamlit: sigue la preferencia del sistema y
+    respeta lo que el usuario elija en el menu de la app (Settings ->
+    Appearance). Si el runtime no expone el dato, se cae al modo oscuro.
+    """
+    try:
+        t = st.context.theme.type
+        if t in ("light", "dark"):
+            return t
+    except Exception:
+        pass
+    return "dark"
+
+
+def cargar_estilos(modo: str) -> None:
     css = (ASSETS / "styles.css").read_text(encoding="utf-8")
-    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+    st.markdown("<style>:root{" + TOKENS[modo] + "}\n" + css + "</style>",
+                unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner=False)
-def logo_svg(alto: int = 46) -> str:
+def logo_svg(alto: int = 46, modo: str = "dark") -> str:
     """
     Devuelve el logotipo como <img> con el SVG embebido en base64.
 
@@ -59,7 +105,14 @@ def logo_svg(alto: int = 46) -> str:
     if not ruta.exists():
         return ('<div style="font:600 0.9rem/1 Inter,sans-serif;color:#f4f3f7;'
                 'letter-spacing:0.18em">PUNTO</div>')
-    b64 = base64.b64encode(ruta.read_bytes()).decode("ascii")
+    svg = ruta.read_text(encoding="utf-8")
+    if modo == "light":
+        # El SVG viene entintado para fondo oscuro; sobre claro se invierten
+        # wordmark, subtitulo y el punto central.
+        svg = (svg.replace("#f4f3f7", "#241d31")
+                  .replace("#8F9C9D", "#5a6668")
+                  .replace("#0f0f16", "#fcfcfb"))
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return (f'<img src="data:image/svg+xml;base64,{b64}" '
             f'alt="Punto Casa de Bolsa" style="height:{alto}px;width:auto;'
             f'display:block" />')
@@ -116,7 +169,7 @@ def tira(tarjetas: list[str], columnas: int | None = None) -> None:
 def panel(titulo: str, extra: str = "") -> None:
     st.markdown(
         f'<div class="panel-titulo"><span>{titulo}</span>'
-        f'<span style="font-weight:500;letter-spacing:0.02em;color:#7d7a90">{extra}</span></div>',
+        f'<span style="font-weight:500;letter-spacing:0.02em;color:var(--tinta-3)">{extra}</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -185,14 +238,14 @@ def registrar_manual(fecha_op, operacion, emisora, titulos, precio) -> None:
 # Barra lateral
 # ==========================================================================
 
-def barra_lateral():
+def barra_lateral(modo: str = "dark"):
     st.sidebar.markdown(
-        f'<div style="padding:0.3rem 0 0.9rem">{logo_svg(40)}</div>',
+        f'<div style="padding:0.3rem 0 0.9rem">{logo_svg(40, modo)}</div>',
         unsafe_allow_html=True)
 
-    st.sidebar.markdown("### Posicion base")
+    st.sidebar.markdown("### Posición base")
     subido = st.sidebar.file_uploader(
-        "Archivo de posicion (.xlsx)", type=["xlsx", "xlsm"],
+        "Archivo de posición (.xlsx)", type=["xlsx", "xlsm"],
         help="La hoja seleccionada debe contener Emisora, Titulos y Precio Compra.")
 
     origen = subido if subido is not None else archivo_por_defecto()
@@ -217,8 +270,8 @@ def barra_lateral():
         st.sidebar.error(f"No se pudo leer el archivo: {e}")
         st.stop()
 
-    hoja = st.sidebar.selectbox("Hoja de la posicion base", hojas, index=0)
-    fecha_base = st.sidebar.date_input("Fecha de la posicion base",
+    hoja = st.sidebar.selectbox("Hoja de la posición base", hojas, index=0)
+    fecha_base = st.sidebar.date_input("Fecha de la posición base",
                                        value=ld.FECHA_BASE_DEFAULT)
 
     st.sidebar.markdown("### Movimientos")
@@ -241,21 +294,21 @@ def barra_lateral():
              "comision e IVA reales. Todo se concilia contra lo ya cargado sin "
              "duplicar operaciones.")
 
-    st.sidebar.markdown("### Efectivo y costos")
+    st.sidebar.markdown("### Liquidez y costos de ejecución")
     efectivo_inicial = st.sidebar.number_input(
-        "Efectivo inicial (MXN)", value=0.0, step=100_000.0, format="%.2f",
+        "Liquidez inicial (MXN)", value=0.0, step=100_000.0, format="%.2f",
         help="Saldo de efectivo en la fecha de la posicion base. Si se deja "
              "en cero, el saldo mostrado es el flujo neto acumulado por las "
              "operaciones.")
     comision_bps = st.sidebar.number_input(
-        "Comision (puntos base)", value=eng.COMISION_BPS_DEFAULT,
+        "Comisión (pb)", value=eng.COMISION_BPS_DEFAULT,
         min_value=0.0, max_value=100.0, step=0.5,
         help="Calibrado en 4 pb contra la boleta Res.104351.")
     tasa_iva = st.sidebar.number_input(
         "IVA sobre comision", value=eng.TASA_IVA_DEFAULT,
         min_value=0.0, max_value=0.30, step=0.01, format="%.2f")
 
-    st.sidebar.markdown("### Analisis")
+    st.sidebar.markdown("### Análisis")
     ventana = st.sidebar.select_slider(
         "Ventana de historico (sesiones)",
         options=[60, 90, 120, 180, 252, 400], value=252)
@@ -263,6 +316,10 @@ def barra_lateral():
         "Tasa libre de riesgo anual", value=0.09, min_value=0.0,
         max_value=0.25, step=0.005, format="%.3f",
         help="Referencia para Sharpe y Sortino. Cetes 28 dias.")
+
+    st.sidebar.caption(
+        f"Apariencia: tema {'oscuro' if modo == 'dark' else 'claro'}, siguiendo "
+        f"al sistema. Para fijarla manualmente: menú ⋮ → Settings → Appearance.")
 
     if st.sidebar.button("Actualizar precios", width="stretch"):
         st.cache_data.clear()
@@ -284,45 +341,62 @@ def pestana_resumen(val, res, resumen, hist, bench_hist, riesgo, conc, fx):
     izq, der = st.columns([1.35, 1])
 
     with izq:
-        panel("Composicion por sector", f"{len(val)} posiciones")
+        panel("Asignación sectorial", f"{len(val)} posiciones")
         st.plotly_chart(viz.treemap_composicion(val, "sector"),
                         width="stretch", config={"displayModeBar": False})
     with der:
-        panel("Desempeno relativo", f"base 100 · {BENCHMARK_NOMBRE}")
+        panel("Desempeño contra el índice", f"base 100 · {BENCHMARK_NOMBRE}")
         serie = an.serie_valor_portafolio(hist, val)
         st.plotly_chart(
             viz.linea_desempeno(serie, bench_hist, "IPC"),
             width="stretch", config={"displayModeBar": False})
 
+    # Contribuciones en puntos porcentuales: la convencion institucional
+    # para comparar aportes entre posiciones de distinto tamano. El importe
+    # en pesos se conserva en el hover.
+    v = val.copy()
+    costo_port = resumen["costo_total"] or 1.0
+    base_dia = (resumen["valor_instrumentos"] - resumen["pnl_dia"]) or 1.0
+    v["contrib_pp"] = v["no_realizado"] / costo_port * 100.0
+    v["contrib_dia_pp"] = v["pnl_dia"] / base_dia * 100.0
+
     izq2, der2 = st.columns(2)
     with izq2:
-        panel("Mayores aportes al resultado", "P&L no realizado")
-        st.plotly_chart(viz.barras_contribucion(val, "emisora", "no_realizado"),
-                        width="stretch", config={"displayModeBar": False})
-    with der2:
-        panel("Movimiento del dia", "variacion contra cierre previo")
+        panel("Contribución al rendimiento",
+              "pp sobre el costo del portafolio · importe en el hover")
         st.plotly_chart(
-            viz.barras_contribucion(val, "emisora", "pnl_dia",
-                                    "P&L del dia (MXN)"),
+            viz.barras_contribucion(v, "emisora", "contrib_pp",
+                                    "Contribución al rendimiento (pp)",
+                                    formato="pp", col_monto="no_realizado",
+                                    altura=430),
+            width="stretch", config={"displayModeBar": False})
+    with der2:
+        panel("Contribución al resultado del día",
+              "pp sobre el valor previo de la posición")
+        st.plotly_chart(
+            viz.barras_contribucion(v, "emisora", "contrib_dia_pp",
+                                    "Contribución al día (pp)",
+                                    formato="pp", col_monto="pnl_dia",
+                                    altura=430),
             width="stretch", config={"displayModeBar": False})
 
-    panel("Indicadores de riesgo y concentracion")
+    panel("Métricas de riesgo y concentración")
     tira([
         tarjeta("Volatilidad anual", pct(riesgo["vol_anual"], 1, False)),
         tarjeta("Sharpe", f"{riesgo['sharpe']:.2f}" if riesgo["sharpe"] == riesgo["sharpe"] else "—"),
         tarjeta("Beta vs IPC", f"{riesgo['beta']:.2f}" if riesgo["beta"] == riesgo["beta"] else "—"),
-        tarjeta("Caida maxima", pct(riesgo["max_drawdown"], 1)),
+        tarjeta("Caída máxima", pct(riesgo["max_drawdown"], 1)),
         tarjeta("VaR 95 % diario", pct(riesgo["var_95"], 2)),
         tarjeta("Posiciones efectivas",
                 f"{conc['n_efectivo']:.1f}" if conc["n_efectivo"] == conc["n_efectivo"] else "—",
                 nota=f"top 5: {conc['top5_pct']:.0f} %"),
-        tarjeta("Exposicion USD", pct(fx["usd_pct"], 1, False),
+        tarjeta("Exposición USD", pct(fx["usd_pct"], 1, False),
                 nota=f"{millones(fx['usd_monto'])}"),
     ], columnas=7)
 
 
 def pestana_posiciones(val):
-    panel("Detalle de posiciones", "valuacion a ultimo precio disponible")
+    panel("Detalle de la posición", "valuación al último precio disponible")
 
     cols = ["emisora", "sector", "industria", "region", "mercado", "clase_activo",
             "titulos", "precio_costo", "precio_mercado", "var_dia_pct",
@@ -376,7 +450,7 @@ def pestana_posiciones(val):
 
 
 def pestana_segmentacion(val, efectivo):
-    dimensiones = [("sector", "Sector"), ("region", "Region geografica"),
+    dimensiones = [("sector", "Sector"), ("region", "Región geográfica"),
                    ("clase_activo", "Clase de activo"), ("mercado", "Mercado"),
                    ("industria", "Industria"), ("divisa_subyacente", "Divisa subyacente")]
 
@@ -384,22 +458,28 @@ def pestana_segmentacion(val, efectivo):
                        horizontal=True, label_visibility="collapsed")
     dim = next(d[0] for d in dimensiones if d[1] == elegida)
 
-    incluir_efectivo = st.checkbox("Incluir efectivo en la distribucion",
+    incluir_efectivo = st.checkbox("Incluir la liquidez en la asignación",
                                    value=False)
     g = eng.agrupar(val, dim, efectivo, incluir_efectivo)
 
     izq, der = st.columns([1, 1])
     with izq:
-        panel(f"Distribucion por {elegida.lower()}")
+        panel(f"Asignación por {elegida.lower()}")
         st.plotly_chart(viz.barras_dimension(g, dim),
                         width="stretch", config={"displayModeBar": False})
     with der:
-        panel(f"Resultado por {elegida.lower()}")
+        g["contrib_pp"] = (g["no_realizado"]
+                           / (float(val["costo_total"].sum()) or 1.0) * 100.0)
+        panel(f"Contribución al rendimiento por {elegida.lower()}",
+              "pp sobre el costo del portafolio")
         st.plotly_chart(
-            viz.barras_contribucion(g, dim, "no_realizado", n=12),
+            viz.barras_contribucion(g, dim, "contrib_pp",
+                                    "Contribución al rendimiento (pp)",
+                                    formato="pp", col_monto="no_realizado",
+                                    n=12),
             width="stretch", config={"displayModeBar": False})
 
-    panel("Tabla de segmentacion")
+    panel("Detalle de la asignación")
     st.dataframe(
         g, width="stretch", hide_index=True,
         column_config={
@@ -416,7 +496,7 @@ def pestana_segmentacion(val, efectivo):
 
 def pestana_riesgo(val, hist, bench_hist, riesgo, conc, riesgo_pos, tecnicos,
                    sin_historico):
-    panel("Metricas de riesgo", f"{riesgo['sesiones']} sesiones · anualizado 252d")
+    panel("Métricas de riesgo", f"{riesgo['sesiones']} sesiones · anualizado 252d")
 
     if sin_historico:
         st.caption(
@@ -440,30 +520,30 @@ def pestana_riesgo(val, hist, bench_hist, riesgo, conc, riesgo_pos, tecnicos,
         tarjeta("VaR 99 % diario", pct(riesgo["var_99"], 2)),
         tarjeta("CVaR 95 %", pct(riesgo["cvar_95"], 2),
                 nota="perdida media en la cola"),
-        tarjeta("Caida maxima", pct(riesgo["max_drawdown"], 1)),
+        tarjeta("Caída máxima", pct(riesgo["max_drawdown"], 1)),
         tarjeta("Herfindahl", f"{conc['hhi']:,.0f}",
                 nota="escala 0 – 10,000"),
-        tarjeta("Concentracion top 10", pct(conc["top10_pct"], 1, False)),
+        tarjeta("Concentración top 10", pct(conc["top10_pct"], 1, False)),
     ], columnas=6)
 
     izq, der = st.columns([1.15, 1])
     with izq:
-        panel("Peso contra contribucion al riesgo",
-              "una barra de riesgo mayor que la de peso indica sobreexposicion")
+        panel("Peso vs contribución al riesgo",
+              "una barra de riesgo mayor que la de peso señala sobreexposición")
         st.plotly_chart(viz.barras_riesgo_vs_peso(riesgo_pos),
                         width="stretch", config={"displayModeBar": False})
     with der:
-        panel("Riesgo contra rendimiento", "el tamano codifica el peso")
+        panel("Riesgo vs rendimiento", "el tamaño codifica el peso en cartera")
         st.plotly_chart(
             viz.dispersion_riesgo_rendimiento(val, tecnicos, riesgo_pos),
             width="stretch", config={"displayModeBar": False})
 
-    panel("Caida acumulada desde maximo", "cartera vigente a titulos constantes")
+    panel("Drawdown de la cartera vigente", "a títulos constantes")
     st.plotly_chart(viz.area_drawdown(an.serie_valor_portafolio(hist, val)),
                     width="stretch", config={"displayModeBar": False})
 
-    panel("Correlacion entre las mayores posiciones",
-          "correlaciones altas reducen la diversificacion efectiva")
+    panel("Correlación entre las principales posiciones",
+          "correlaciones altas reducen la diversificación efectiva")
     st.plotly_chart(viz.mapa_correlacion(an.matriz_correlacion(hist, val)),
                     width="stretch", config={"displayModeBar": False})
 
@@ -474,7 +554,7 @@ def pestana_atribucion(val, tecnicos):
                    label_visibility="collapsed")
 
     atr = an.atribucion(val, dim)
-    panel(f"Contribucion al resultado por {dim}",
+    panel(f"Atribución del resultado por {dim}",
           "la suma de las contribuciones reproduce el rendimiento del portafolio")
     st.dataframe(
         atr, width="stretch", hide_index=True,
@@ -487,7 +567,7 @@ def pestana_atribucion(val, tecnicos):
             "n": st.column_config.NumberColumn("Pos.", format="%d"),
             "rend_pct": st.column_config.NumberColumn("Rend.", format="%+.2f %%"),
             "peso_pct": st.column_config.NumberColumn("Peso", format="%.2f %%"),
-            "contrib_pct": st.column_config.NumberColumn("Contribucion", format="%+.3f %%"),
+            "contrib_pct": st.column_config.NumberColumn("Contribución (pp)", format="%+.2f pp"),
         })
 
     ganadores, perdedores = an.ganadores_perdedores(val, 8)
@@ -506,14 +586,14 @@ def pestana_atribucion(val, tecnicos):
         "pnl_dia": st.column_config.NumberColumn("P&L dia", format="localized"),
     }
     with izq:
-        panel("Lo que esta funcionando", "mayores aportes en pesos")
+        panel("Principales contribuidores", "mayores aportes en pesos")
         st.dataframe(ganadores, width="stretch", hide_index=True, column_config=cfg)
     with der:
-        panel("Lo que no esta funcionando", "mayores detracciones en pesos")
+        panel("Principales detractores", "mayores detracciones en pesos")
         st.dataframe(perdedores, width="stretch", hide_index=True, column_config=cfg)
 
     if tecnicos is not None and len(tecnicos):
-        panel("Senales tecnicas", "medias moviles, RSI de 14 sesiones y momentum")
+        panel("Señales técnicas", "medias móviles, RSI de 14 sesiones y momentum")
         t = tecnicos.merge(val[["ticker", "emisora", "sector", "peso_pct"]],
                            on="ticker", how="inner")
         cols = ["emisora", "sector", "peso_pct", "vs_media50_pct",
@@ -535,18 +615,19 @@ def pestana_atribucion(val, tecnicos):
             })
 
 
-def pestana_efectivo(res, resumen, fx):
-    panel("Esquema de efectivo",
+def pestana_efectivo(res, resumen, fx, fecha_base):
+    panel("Posición de liquidez",
           "el saldo se construye a partir de los flujos de compra y venta")
     tira([
-        tarjeta("Efectivo inicial", millones(res.efectivo_inicial)),
+        tarjeta("Liquidez inicial", millones(res.efectivo_inicial)),
         tarjeta("Ventas (bruto)", millones(res.flujo_ventas)),
         tarjeta("Compras (bruto)", millones(-res.flujo_compras)),
-        tarjeta("Comisiones e IVA", millones(-res.costos_totales)),
-        tarjeta("Saldo actual", millones(res.efectivo),
+        tarjeta("Costos de ejecución", mxn(-res.costos_totales),
+                nota="comisión + IVA"),
+        tarjeta("Liquidez actual", millones(res.efectivo),
                 clase_delta=clase(res.efectivo)),
         tarjeta("Peso en portafolio", pct(resumen["peso_efectivo_pct"], 2, False)),
-        tarjeta("Resultado realizado", millones(res.realizado),
+        tarjeta("Utilidad realizada", millones(res.realizado),
                 clase_delta=clase(res.realizado)),
     ], columnas=7)
 
@@ -558,19 +639,19 @@ def pestana_efectivo(res, resumen, fx):
             f"«Efectivo inicial» en el panel lateral con el saldo real del "
             f"contrato a la fecha de la posicion base para que el esquema cuadre.")
 
-    serie = eng.serie_efectivo(res.bitacora, res.efectivo_inicial)
+    serie = eng.serie_efectivo(res.bitacora, res.efectivo_inicial, fecha_base)
     izq, der = st.columns([1.25, 1])
     with izq:
-        panel("Evolucion del saldo")
+        panel("Evolución del saldo de liquidez")
         st.plotly_chart(viz.escalones_efectivo(serie),
                         width="stretch", config={"displayModeBar": False})
     with der:
-        panel("Flujo neto por dia")
+        panel("Flujo neto diario")
         st.plotly_chart(viz.barras_flujo(res.bitacora),
                         width="stretch", config={"displayModeBar": False})
 
-    panel("Exposicion cambiaria", "las emisoras del SIC cotizan en pesos "
-                                  "pero su valor subyacente esta en dolares")
+    panel("Exposición cambiaria", "las emisoras del SIC cotizan en pesos "
+                                  "pero su valor subyacente está en dólares")
     tira([
         tarjeta("Valor en USD subyacente", millones(fx["usd_monto"]),
                 nota=f"{fx['usd_pct']:.1f} % del portafolio"),
@@ -581,7 +662,7 @@ def pestana_efectivo(res, resumen, fx):
 
 
 def pestana_operaciones(res, cfg):
-    panel("Registrar operacion", "se aplica de inmediato sobre la posicion")
+    panel("Registrar operación", "se aplica de inmediato sobre la posición")
 
     with st.form("alta_operacion", clear_on_submit=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 0.8, 1.5, 1, 1])
@@ -610,7 +691,7 @@ def pestana_operaciones(res, cfg):
                 st.rerun()
 
     if len(st.session_state.manuales):
-        panel("Operaciones capturadas en esta sesion",
+        panel("Operaciones capturadas en esta sesión",
               "no se guardan al cerrar; expórtalas si quieres conservarlas")
         st.dataframe(st.session_state.manuales, width="stretch", hide_index=True)
         c1, c2 = st.columns([1, 4])
@@ -625,7 +706,7 @@ def pestana_operaciones(res, cfg):
                 file_name=f"operaciones_capturadas_{date.today():%Y%m%d}.csv",
                 mime="text/csv")
 
-    panel("Bitacora consolidada",
+    panel("Bitácora consolidada",
           f"{len(res.bitacora)} operaciones · comision {cfg['comision_bps']:.1f} pb "
           f"+ IVA {cfg['tasa_iva']:.0%}")
 
@@ -662,8 +743,8 @@ def pestana_operaciones(res, cfg):
 
 
 def pestana_diagnostico(hallazgos, res):
-    panel("Diagnostico automatico",
-          "reglas de mesa aplicadas sobre las metricas del portafolio")
+    panel("Diagnóstico de cartera",
+          "reglas de mesa aplicadas sobre las métricas del portafolio")
 
     if not hallazgos:
         st.success("No se detectaron desviaciones relevantes.")
@@ -678,7 +759,7 @@ def pestana_diagnostico(hallazgos, res):
                 unsafe_allow_html=True)
 
     if res.incidencias:
-        panel("Incidencias de conciliacion")
+        panel("Incidencias de conciliación")
         for i in res.incidencias:
             st.warning(i)
 
@@ -751,9 +832,11 @@ no se refleja en el esquema de efectivo.
 # ==========================================================================
 
 def main() -> None:
-    cargar_estilos()
+    modo = tema_activo()
+    viz.registrar_plantilla(modo)
+    cargar_estilos(modo)
     inicializar_estado()
-    cfg = barra_lateral()
+    cfg = barra_lateral(modo)
 
     # --- Carga y consolidacion -------------------------------------------
     try:
@@ -847,38 +930,44 @@ def main() -> None:
 
     st.markdown(
         f'<div class="cabecera">'
-        f'<div class="cabecera-logo">{logo_svg()}</div>'
+        f'<div class="cabecera-logo">{logo_svg(46, modo)}</div>'
         f'<div style="text-align:right">'
-        f'<div class="cabecera-titulo">Portafolio de Inversion BAZ</div>'
+        f'<div class="cabecera-titulo">Portafolio de Inversión BAZ</div>'
         f'<div class="cabecera-sub">'
-        f'Posicion base {base.fecha:%d %b %Y} · hoja «{base.hoja}» · '
+        f'Contrato 104351 · Posición base {base.fecha:%d %b %Y} · '
         f'Precios al {sello_precio} · '
         f'USDMXN {fx_dato["valor"]:,.4f} · '
-        f'Consulta {datetime.now():%d %b %Y %H:%M}'
+        f'Cifras en MXN · Consulta {datetime.now():%d %b %Y %H:%M}'
         f'</div></div></div>',
         unsafe_allow_html=True)
 
     # --- Indicadores de cabecera ------------------------------------------
+    et_no_real = ("Plusvalía no realizada" if resumen["no_realizado"] >= 0
+                  else "Minusvalía no realizada")
+    et_real = ("Utilidad realizada" if resumen["realizado"] >= 0
+               else "Pérdida realizada")
     tira([
-        tarjeta("Valor del portafolio", millones(resumen["valor_total"]),
-                nota=f"{resumen['n_posiciones']} posiciones + efectivo"),
-        tarjeta("Valor en instrumentos", millones(resumen["valor_instrumentos"])),
-        tarjeta("Costo de adquisicion", millones(resumen["costo_total"])),
-        tarjeta("P&L no realizado", millones(resumen["no_realizado"]),
-                pct(resumen["rend_pct"]), clase(resumen["no_realizado"])),
-        tarjeta("P&L realizado", millones(resumen["realizado"]),
+        tarjeta("Valor total del portafolio", millones(resumen["valor_total"]),
+                nota=f"{resumen['n_posiciones']} posiciones + liquidez"),
+        tarjeta("Posición en valores", millones(resumen["valor_instrumentos"])),
+        tarjeta("Costo de adquisición", millones(resumen["costo_total"])),
+        tarjeta(et_no_real, millones(resumen["no_realizado"]),
+                pct(resumen["rend_pct"]), clase(resumen["no_realizado"]),
+                nota="sobre costo promedio"),
+        tarjeta(et_real, millones(resumen["realizado"]),
                 clase_delta=clase(resumen["realizado"]),
-                nota="ventas del periodo"),
-        tarjeta("Resultado del dia", millones(resumen["pnl_dia"]),
-                pct(resumen["var_dia_pct"]), clase(resumen["pnl_dia"])),
-        tarjeta("Efectivo", millones(resumen["efectivo"]),
+                nota="operaciones del periodo"),
+        tarjeta("Resultado del día", millones(resumen["pnl_dia"]),
+                pct(resumen["var_dia_pct"]), clase(resumen["pnl_dia"]),
+                nota="solo posición en valores"),
+        tarjeta("Liquidez", millones(resumen["efectivo"]),
                 pct(resumen["peso_efectivo_pct"], 1, False),
                 clase(resumen["efectivo"])),
     ], columnas=7)
 
     # --- Pestanas ---------------------------------------------------------
-    tabs = st.tabs(["Resumen", "Posiciones", "Segmentacion", "Riesgo",
-                    "Atribucion", "Efectivo", "Operaciones", "Diagnostico"])
+    tabs = st.tabs(["Resumen", "Posiciones", "Asignación", "Riesgo",
+                    "Atribución", "Liquidez", "Operaciones", "Diagnóstico"])
 
     with tabs[0]:
         pestana_resumen(val, res, resumen, hist_activos, bench_hist,
@@ -893,7 +982,7 @@ def main() -> None:
     with tabs[4]:
         pestana_atribucion(val, tecnicos)
     with tabs[5]:
-        pestana_efectivo(res, resumen, fx)
+        pestana_efectivo(res, resumen, fx, cfg["fecha_base"])
     with tabs[6]:
         pestana_operaciones(res, cfg)
     with tabs[7]:

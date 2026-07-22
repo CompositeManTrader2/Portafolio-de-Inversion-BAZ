@@ -371,28 +371,45 @@ def consolidar_movimientos(*bloques: pd.DataFrame) -> pd.DataFrame:
         return _mov_vacio()
 
     df = pd.concat(vivos, ignore_index=True)
-    df["_precio_r"] = df["precio"].round(6)
 
-    # Una operacion se identifica por emisora, sentido, titulos y precio.
-    # La fecha se deja fuera de la llave a proposito: la bitacora interna y
-    # la boleta pueden diferir (concertacion vs liquidacion) o venir vacia,
-    # y una coincidencia exacta en los otros cuatro campos ya es un duplicado.
-    llave = ["operacion", "emisora", "titulos", "_precio_r"]
+    # Una operacion se identifica por emisora, sentido, titulos y precio, y
+    # dos registros con esa misma llave se fusionan SOLO si sus fechas son
+    # compatibles: iguales, o una de las dos vacia. La bitacora interna y la
+    # boleta pueden diferir en fecha (concertacion vs liquidacion) o traerla
+    # vacia, y ahi la fusion es correcta; pero dos operaciones legitimas con
+    # los mismos parametros en dias distintos (recomprar el mismo lote al
+    # mismo precio dias despues) deben sobrevivir como operaciones separadas.
+    # Al fusionar se conserva el primer valor no nulo de cada campo, de modo
+    # que la boleta aporta comision e IVA reales y la bitacora la fecha.
+    consolidadas: list[dict] = []
+    indice: dict[tuple, list[int]] = {}
 
-    # Se conserva el primer valor no nulo de cada campo, de modo que la boleta
-    # aporte comision e IVA reales y la bitacora aporte la fecha si falta.
-    def primero_valido(s: pd.Series):
-        validos = s.dropna()
-        return validos.iloc[0] if len(validos) else None
+    for _, fila in df.iterrows():
+        llave = (fila["operacion"], fila["emisora"],
+                 float(fila["titulos"]), round(float(fila["precio"]), 6))
+        fecha = fila["fecha"] if not pd.isna(fila["fecha"]) else None
 
-    agregaciones = {c: primero_valido
-                    for c in ("precio", "fecha", "comision", "iva", "importe_neto")}
-    agregaciones["fuente"] = lambda s: " + ".join(
-        dict.fromkeys(f for f in s.dropna() if f))
+        destino = None
+        for i in indice.get(llave, []):
+            fecha_prev = consolidadas[i]["fecha"]
+            if fecha is None or fecha_prev is None or fecha == fecha_prev:
+                destino = i
+                break
 
-    df = (df.groupby(llave, as_index=False, sort=False, dropna=False)
-            .agg(agregaciones)
-            .drop(columns="_precio_r"))
+        if destino is None:
+            nueva = {c: (None if pd.isna(fila[c]) else fila[c])
+                     for c in COLUMNAS_MOV}
+            consolidadas.append(nueva)
+            indice.setdefault(llave, []).append(len(consolidadas) - 1)
+        else:
+            entrada = consolidadas[destino]
+            for c in ("fecha", "comision", "iva", "importe_neto"):
+                if entrada[c] is None and not pd.isna(fila[c]):
+                    entrada[c] = fila[c]
+            fuentes = [f for f in (entrada["fuente"], fila["fuente"]) if f]
+            entrada["fuente"] = " + ".join(dict.fromkeys(fuentes))
+
+    df = pd.DataFrame(consolidadas, columns=COLUMNAS_MOV)
 
     # Orden cronologico estable; las operaciones sin fecha van al final.
     df["_sin_fecha"] = df["fecha"].isna()

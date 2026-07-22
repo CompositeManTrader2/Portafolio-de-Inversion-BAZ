@@ -18,43 +18,82 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 
-# --- Superficies y tintas (verificadas por contraste) ---------------------
-PLANO = "#0a0a0f"
-SUPERFICIE = "#14141b"
-BORDE = "#2a2a38"
-TINTA = "#f4f3f7"
-TINTA_2 = "#a8a5b8"
-TINTA_3 = "#7d7a90"
+# --------------------------------------------------------------------------
+# Temas
+# --------------------------------------------------------------------------
+# Ambos modos usan las mismas ocho familias de color categorico en el mismo
+# orden fijo; cada modo toma el escalon validado para su superficie (banda de
+# luminosidad, piso de croma, separacion CVD adyacente >= 8.4, piso de vision
+# normal >= 19.3 y contraste >= 3:1 en las ocho ranuras). Los tonos de cifra
+# (pos/neg de texto) estan verificados a >= 4.5:1 sobre su superficie; los de
+# marca (rellenos) a >= 3:1.
 
-MARCA = "#522D6D"
-MARCA_CLARA = "#9085e9"
+TEMAS: dict[str, dict] = {
+    "dark": dict(
+        plano="#0a0a0f", superficie="#14141b", borde="#2a2a38",
+        tinta="#f4f3f7", tinta_2="#a8a5b8", tinta_3="#7d7a90",
+        marca="#522D6D", acento="#9085e9",
+        positivo="#0ca30c", negativo="#d03b3b",
+        positivo_txt="#22c55e", negativo_txt="#ef4444",
+        neutro="#4a4a5c", neutro_medio="#6b6b78",
+        treemap_txt="#ffffff",
+        categorica=["#3987e5", "#008300", "#d55181", "#c98500",
+                    "#199e70", "#d95926", "#9085e9", "#e66767"],
+        divergente_frio=("#1b4f8f", "#3987e5"),
+        divergente_calido=("#d95926", "#8f2f10"),
+    ),
+    "light": dict(
+        plano="#f7f6f9", superficie="#fcfcfb", borde="#e0dee8",
+        tinta="#17161f", tinta_2="#4d4a5a", tinta_3="#716e82",
+        marca="#522D6D", acento="#5e3a86",
+        positivo="#0ca30c", negativo="#d03b3b",
+        positivo_txt="#006300", negativo_txt="#b3281e",
+        neutro="#c6c4d2", neutro_medio="#d8d6e0",
+        treemap_txt="#ffffff",
+        categorica=["#2a78d6", "#008300", "#e87ba4", "#eda100",
+                    "#1baf7a", "#eb6834", "#4a3aa7", "#e34948"],
+        divergente_frio=("#104281", "#2a78d6"),
+        divergente_calido=("#eb6834", "#8f2f10"),
+    ),
+}
 
-POSITIVO = "#0ca30c"
-NEGATIVO = "#d03b3b"
-POSITIVO_TXT = "#22c55e"
-NEGATIVO_TXT = "#ef4444"
-NEUTRO = "#4a4a5c"
+# Globales del tema activo; los constructores de figuras los leen al vuelo.
+MODO = "dark"
+PLANO = SUPERFICIE = BORDE = TINTA = TINTA_2 = TINTA_3 = ""
+MARCA = MARCA_CLARA = POSITIVO = NEGATIVO = ""
+POSITIVO_TXT = NEGATIVO_TXT = NEUTRO = NEUTRO_MEDIO = TREEMAP_TXT = ""
+CATEGORICA: list[str] = []
+_DIV_FRIO = _DIV_CALIDO = ("", "")
 
-# Paleta categorica de orden fijo. Validada sobre la superficie #14141b:
-# banda de luminosidad, piso de croma, separacion CVD adyacente 8.4,
-# piso de vision normal 19.3 y contraste >= 3:1 en las ocho ranuras.
-CATEGORICA = [
-    "#3987e5",  # 1 azul
-    "#008300",  # 2 verde
-    "#d55181",  # 3 magenta
-    "#c98500",  # 4 amarillo
-    "#199e70",  # 5 aqua
-    "#d95926",  # 6 naranja
-    "#9085e9",  # 7 violeta
-    "#e66767",  # 8 rojo
-]
+
+def activar_tema(modo: str = "dark") -> None:
+    """Fija los globales de color al tema pedido ('dark' o 'light')."""
+    global MODO, PLANO, SUPERFICIE, BORDE, TINTA, TINTA_2, TINTA_3
+    global MARCA, MARCA_CLARA, POSITIVO, NEGATIVO, POSITIVO_TXT, NEGATIVO_TXT
+    global NEUTRO, NEUTRO_MEDIO, TREEMAP_TXT, CATEGORICA, _DIV_FRIO, _DIV_CALIDO
+
+    t = TEMAS.get(modo, TEMAS["dark"])
+    MODO = modo if modo in TEMAS else "dark"
+    PLANO, SUPERFICIE, BORDE = t["plano"], t["superficie"], t["borde"]
+    TINTA, TINTA_2, TINTA_3 = t["tinta"], t["tinta_2"], t["tinta_3"]
+    MARCA, MARCA_CLARA = t["marca"], t["acento"]
+    POSITIVO, NEGATIVO = t["positivo"], t["negativo"]
+    POSITIVO_TXT, NEGATIVO_TXT = t["positivo_txt"], t["negativo_txt"]
+    NEUTRO, NEUTRO_MEDIO = t["neutro"], t["neutro_medio"]
+    TREEMAP_TXT = t["treemap_txt"]
+    CATEGORICA = list(t["categorica"])
+    _DIV_FRIO, _DIV_CALIDO = t["divergente_frio"], t["divergente_calido"]
+
+
+activar_tema("dark")
 
 MONO = "JetBrains Mono, IBM Plex Mono, SF Mono, Consolas, monospace"
 SANS = "Inter, -apple-system, Segoe UI, Roboto, sans-serif"
 
 
-def registrar_plantilla() -> None:
-    """Registra y activa la plantilla 'punto' en Plotly."""
+def registrar_plantilla(modo: str = "dark") -> None:
+    """Activa el tema pedido y registra la plantilla 'punto' en Plotly."""
+    activar_tema(modo)
     pio.templates["punto"] = go.layout.Template(
         layout=dict(
             paper_bgcolor=SUPERFICIE,
@@ -71,8 +110,10 @@ def registrar_plantilla() -> None:
             legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10.5, color=TINTA_2),
                         orientation="h", yanchor="bottom", y=1.02,
                         xanchor="left", x=0),
-            hoverlabel=dict(bgcolor="#1c1c26", bordercolor=BORDE,
-                            font=dict(family=MONO, size=11, color=TINTA)),
+            hoverlabel=dict(
+                bgcolor="#1c1c26" if MODO == "dark" else "#ffffff",
+                bordercolor=BORDE,
+                font=dict(family=MONO, size=11, color=TINTA)),
             margin=dict(l=10, r=14, t=34, b=10),
             separators=".,",
         )
@@ -129,7 +170,7 @@ def treemap_composicion(valuada: pd.DataFrame, dimension: str = "sector",
                     line=dict(color=SUPERFICIE, width=2)),  # separacion de 2 px
         customdata=[f"{p:.1f} %" for p in pesos],
         texttemplate="<b>%{label}</b><br>%{customdata}",
-        textfont=dict(family=MONO, size=10.5, color="#ffffff"),
+        textfont=dict(family=MONO, size=10.5, color=TREEMAP_TXT),
         hovertemplate=("<b>%{label}</b><br>Valor  %{value:,.0f} MXN"
                        "<br>Peso   %{customdata}<extra></extra>"),
         tiling=dict(pad=2),
@@ -139,8 +180,17 @@ def treemap_composicion(valuada: pd.DataFrame, dimension: str = "sector",
     return fig
 
 
+def _altura_por_filas(n: int, minimo: int = 300, maximo: int = 780) -> int:
+    """
+    Alto del lienzo en funcion del numero de barras horizontales. Con altura
+    fija, una dimension de muchas categorias (industria tiene 23) comprimia
+    las barras hasta volverlas ilegibles.
+    """
+    return int(max(minimo, min(maximo, 110 + 28 * n)))
+
+
 def barras_dimension(agrupado: pd.DataFrame, dimension: str,
-                     altura: int = 340) -> go.Figure:
+                     altura: int | None = None) -> go.Figure:
     """
     Peso por dimension. Categoria nominal sin orden intrinseco: una sola
     serie, por lo tanto un solo tono y sin caja de leyenda.
@@ -148,6 +198,7 @@ def barras_dimension(agrupado: pd.DataFrame, dimension: str,
     if not len(agrupado):
         return _vacio()
 
+    altura = altura or _altura_por_filas(len(agrupado))
     df = agrupado.sort_values("valor_mercado")
     fig = go.Figure(go.Bar(
         x=df["peso_pct"], y=df[dimension].astype(str), orientation="h",
@@ -178,33 +229,58 @@ def barras_dimension(agrupado: pd.DataFrame, dimension: str,
 # --------------------------------------------------------------------------
 
 def barras_contribucion(df: pd.DataFrame, etiqueta: str, valor: str,
-                        titulo_eje: str = "P&L no realizado (MXN)",
-                        altura: int = 430, n: int = 18) -> go.Figure:
+                        titulo_eje: str = "Resultado no realizado (MXN)",
+                        altura: int | None = None, n: int = 18,
+                        formato: str = "mxn",
+                        col_monto: str | None = None) -> go.Figure:
     """
     Aporte al resultado, ordenado. Polaridad -> escala divergente con
     gris neutro implicito en el cero; el eje con signo es el codificado
     secundario que evita depender solo del color.
+
+    Con formato='pp' el valor viene en puntos porcentuales de contribucion al
+    rendimiento del portafolio (la convencion institucional para comparar
+    aportes entre posiciones de distinto tamano); `col_monto` agrega el
+    importe en pesos al hover para no perder la magnitud absoluta.
     """
     if not len(df):
         return _vacio()
 
     d = df.reindex(df[valor].abs().sort_values(ascending=False).index).head(n)
     d = d.sort_values(valor)
+    altura = altura or _altura_por_filas(len(d))
+
+    if formato == "pp":
+        texto = [f"{v:+.2f}" for v in d[valor]]
+        sufijo_eje = dict(ticksuffix=" pp")
+        if col_monto and col_monto in d.columns:
+            hover = ("<b>%{y}</b><br>Contribucion  %{x:+.2f} pp"
+                     "<br>Importe       %{customdata:,.0f} MXN<extra></extra>")
+            customdata = d[col_monto]
+        else:
+            hover = "<b>%{y}</b><br>Contribucion  %{x:+.2f} pp<extra></extra>"
+            customdata = None
+    else:
+        texto = [f"{v/1e6:+,.2f} M" for v in d[valor]]
+        sufijo_eje = {}
+        hover = "<b>%{y}</b><br>" + titulo_eje + "  %{x:,.0f}<extra></extra>"
+        customdata = None
 
     fig = go.Figure(go.Bar(
         x=d[valor], y=d[etiqueta].astype(str), orientation="h",
         marker=dict(color=_color_direccional(d[valor]),
                     line=dict(color=SUPERFICIE, width=2)),
-        text=[f"{v/1e6:+,.2f} M" for v in d[valor]],
+        text=texto,
         textposition="outside",
         textfont=dict(family=MONO, size=10, color=TINTA_2),
-        hovertemplate="<b>%{y}</b><br>" + titulo_eje + "  %{x:,.0f}<extra></extra>",
+        customdata=customdata,
+        hovertemplate=hover,
         cliponaxis=False,
     ))
     fig.add_vline(x=0, line=dict(color=TINTA_3, width=1))
     fig.update_layout(
         height=altura, bargap=0.32,
-        xaxis=dict(title=titulo_eje, showgrid=True),
+        xaxis=dict(title=titulo_eje, showgrid=True, **sufijo_eje),
         yaxis=dict(title=None),
         margin=dict(l=6, r=76, t=12, b=8),
     )
@@ -377,9 +453,8 @@ def mapa_correlacion(corr: pd.DataFrame, altura: int = 500) -> go.Figure:
         return _vacio("Se requiere historico de al menos 30 sesiones")
 
     escala = [
-        [0.00, "#1b4f8f"], [0.25, "#3987e5"], [0.47, "#5a5a68"],
-        [0.50, "#6b6b78"], [0.53, "#5a5a68"], [0.75, "#d95926"],
-        [1.00, "#8f2f10"],
+        [0.00, _DIV_FRIO[0]], [0.25, _DIV_FRIO[1]], [0.50, NEUTRO_MEDIO],
+        [0.75, _DIV_CALIDO[0]], [1.00, _DIV_CALIDO[1]],
     ]
     fig = go.Figure(go.Heatmap(
         z=corr.values, x=corr.columns, y=corr.index,

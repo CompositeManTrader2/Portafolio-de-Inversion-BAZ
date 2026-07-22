@@ -79,7 +79,11 @@ def metricas_riesgo(rend_port: pd.Series,
 
     r = rend_port.dropna()
     vol = float(r.std(ddof=1) * np.sqrt(SESIONES_ANIO))
-    rend_anual = float(r.mean() * SESIONES_ANIO)
+    # La media de rendimientos log anualizada se convierte a rendimiento
+    # efectivo (exp - 1) antes de compararla con la tasa libre, que es
+    # aritmetica. Restar una log-media de una tasa efectiva sesga el Sharpe
+    # a la baja, mas cuanto mayor la volatilidad.
+    rend_anual = float(np.expm1(r.mean() * SESIONES_ANIO))
     rf = tasa_libre_anual
 
     bajistas = r[r < 0]
@@ -112,7 +116,7 @@ def metricas_riesgo(rend_port: pd.Series,
             cov = float(par.cov().iloc[0, 1])
             var_b = float(par["bench"].var(ddof=1))
             beta = cov / var_b if var_b else np.nan
-            rend_b_anual = float(par["bench"].mean() * SESIONES_ANIO)
+            rend_b_anual = float(np.expm1(par["bench"].mean() * SESIONES_ANIO))
             activo = par["port"] - par["bench"]
             te = float(activo.std(ddof=1) * np.sqrt(SESIONES_ANIO))
             m.update(

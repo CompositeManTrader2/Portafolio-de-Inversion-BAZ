@@ -1,5 +1,16 @@
+# Con ambas secciones definidas, Streamlit sigue la preferencia del sistema
+# y el usuario puede fijar el modo en el menu de la app (Settings ->
+# Appearance). Los tokens de la interfaz propia los inyecta app.py leyendo
+# st.context.theme, de modo que todo cambia junto.
+
 [theme]
-base = "dark"
+primaryColor = "#522D6D"
+backgroundColor = "#f7f6f9"
+secondaryBackgroundColor = "#fcfcfb"
+textColor = "#17161f"
+font = "sans serif"
+
+[theme.dark]
 primaryColor = "#9085e9"
 backgroundColor = "#0a0a0f"
 secondaryBackgroundColor = "#14141b"
