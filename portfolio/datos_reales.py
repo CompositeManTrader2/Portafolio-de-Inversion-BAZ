@@ -1,5 +1,5 @@
 """
-Alimenta el tablero HTML rediseñado con los datos reales del portafolio.
+Alimenta el tablero HTML (assets/dashboard_baz.html) con los datos reales.
 
 El HTML trae un componente cuyo estado de ejemplo vive en literales de
 JavaScript (SEED, EFECTIVO, métricas de riesgo, atribución, operaciones,
@@ -16,22 +16,20 @@ recibe una página estática cuyo interior ya son cifras reales.
 from __future__ import annotations
 
 import re
-import sys
 from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-RAIZ = Path(__file__).parent.parent
-sys.path.insert(0, str(RAIZ))
+from . import analytics as an
+from . import benchmark as bmk
+from . import engine as eng
+from . import loader as ld
+from . import market as mk
+from .taxonomy import BENCHMARK_TICKER, FX_TICKER
 
-from portfolio import analytics as an          # noqa: E402
-from portfolio import benchmark as bmk         # noqa: E402
-from portfolio import engine as eng            # noqa: E402
-from portfolio import loader as ld             # noqa: E402
-from portfolio import market as mk             # noqa: E402
-from portfolio.taxonomy import BENCHMARK_TICKER, FX_TICKER  # noqa: E402
+RAIZ = Path(__file__).parent.parent
 
 DATOS = RAIZ / "data"
 FECHA_BASE = date(2026, 7, 15)
@@ -549,6 +547,6 @@ def inyectar(html: str, d: dict) -> str:
 
 
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
-    ruta = ruta_html or (Path(__file__).parent / "dashboard_baz.html")
+    ruta = ruta_html or (RAIZ / "assets" / "dashboard_baz.html")
     html = ruta.read_text(encoding="utf-8")
     return inyectar(html, calcular())

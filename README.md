@@ -21,7 +21,7 @@ atribución, riesgo y diagnóstico que se presenta al cliente.
 | **Rendimiento** | TWR real del periodo reconstruyendo la tenencia de cada día (valores + liquidez, sin flujos externos) |
 | **Atribución** | Brinson-Fachler contra el S&P/BMV IPC (asignación + selección + interacción = retorno activo, identidad exacta) sobre un benchmark reconstruido a nivel constituyente con pesos editables en `data/benchmark_ipc.csv`; más contribución por dimensión y por emisora |
 | **Diagnóstico** | Reglas de mesa que señalan qué está funcionando y qué no |
-| **Captura** | Alta de operaciones desde la propia interfaz |
+| **Operaciones nuevas** | Se integran dejando la boleta del custodio en `data/` (cualquier Excel con Fecha/Operación/Emisora/Títulos/Precio); la conciliación evita duplicados |
 
 ---
 
@@ -32,8 +32,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Al arrancar toma automáticamente el archivo de posición que esté en `data/`.
-También se puede cargar otro desde el panel lateral.
+Al arrancar toma automáticamente el archivo de posición y las boletas que
+estén en `data/`.
 
 ---
 
@@ -45,13 +45,12 @@ siempre como `títulos × precio`: el archivo original los expresa en millones y
 con redondeos, así que recomputarlos evita arrastrar esa pérdida de precisión.
 
 ### Movimientos
-Se consolidan de tres fuentes, sin duplicar:
+Se consolidan de dos fuentes, sin duplicar:
 
 1. **Bitácora interna** — hoja `Coste` del mismo archivo.
 2. **Archivos de operaciones** — todo `.xlsx` en `data/` que no sea el de
-   posición, más los que se carguen desde el panel lateral. Se recorren todas
-   sus hojas. Las boletas del custodio aportan además comisión e IVA reales.
-3. **Captura manual** — desde la pestaña *Operaciones*.
+   posición. Se recorren todas sus hojas. Las boletas del custodio aportan
+   además comisión e IVA reales.
 
 `data/` incluye las boletas del **16, 17, 20 y 21 de julio de 2026**, que
 cubren las 10 operaciones del periodo con sus costos reales.
@@ -107,47 +106,55 @@ cuáles** en vez de omitirlas en silencio.
 El saldo parte de un **efectivo inicial configurable** (cero por omisión) y
 acumula los flujos netos de cada operación. Con el saldo inicial en cero el
 número que se muestra es el flujo neto acumulado del periodo, no el saldo real
-del contrato: para que el esquema cuadre hay que capturar en el panel lateral el
-efectivo real a la fecha de la posición base.
+del contrato: para que el esquema cuadre, captura el saldo real a la fecha base
+en `portfolio/datos_reales.py` (parámetro `efectivo_inicial` de `calcular`).
 
 ---
 
 ## Estructura
 
 ```
-app.py                  Interfaz y orquestación
+app.py                  Punto de entrada: sirve el tablero con datos reales
 portfolio/
   taxonomy.py           Emisora → ticker, sector, industria, región, divisa
   loader.py             Lectura de posición, bitácora y boletas
-  engine.py             Posición, efectivo, resultado realizado, valuación
-  market.py             Capa Yahoo Finance con caché
-  analytics.py          Riesgo, atribución, concentración, diagnóstico
-  viz.py                Plantilla Plotly y constructores de figuras
-assets/                 Logotipo y hoja de estilo
-data/                   Archivos de posición y boletas
+  engine.py             Posición, liquidez, resultado realizado, valuación
+  market.py             Capa Yahoo Finance con caché y reintento por ticker
+  analytics.py          Riesgo, atribución Brinson-Fachler, diagnóstico
+  benchmark.py          IPC reconstruido a nivel constituyente
+  datos_reales.py       Inyección de las cifras reales en el tablero HTML
+assets/
+  dashboard_baz.html    La vista: tablero institucional autocontenido
+data/                   Posición base, boletas del custodio y benchmark_ipc.csv
 ```
 
 ---
 
-## Diseño
+## Arquitectura de la vista
 
-Doble tema con el morado institucional `#522D6D`: la app sigue la preferencia
-del sistema (claro u oscuro) vía `st.context.theme` y puede fijarse manualmente
-en el menú ⋮ → *Settings* → *Appearance*. Los tokens de la interfaz, la
-plantilla de Plotly y el logotipo cambian juntos; el modo oscuro trabaja sobre
-`#14141b` y el claro sobre `#fcfcfb`.
+La interfaz es un tablero HTML autocontenido (`assets/dashboard_baz.html`) con
+tema claro/oscuro propio y el morado institucional `#522D6D`. Sus datos de
+ejemplo viven como literales de JavaScript; `portfolio/datos_reales.py` corre
+el pipeline completo y los sustituye por las cifras reales **antes de servir la
+página**, mediante reemplazos anclados que fallan ruidosamente si el HTML
+cambia de forma. `app.py` cachea el resultado cinco minutos y, si el cálculo
+falla (por ejemplo sin red), sirve la plantilla de ejemplo con una advertencia
+visible.
 
-La paleta categórica es de orden fijo y cada modo usa el escalón validado para
-su superficie: banda de luminosidad, piso de croma, separación bajo
-deuteranopia y protanopia (ΔE ≥ 8.4 adyacente), piso de visión normal
-(ΔE ≥ 19.3) y contraste ≥ 3:1 en las ocho ranuras.
+Queda real en cada carga: posición completa, liquidez, KPIs, las 20 métricas de
+riesgo, la atribución Brinson-Fachler de los cuatro periodos, la gráfica de
+desempeño vs IPC, el histograma de rendimientos, los escenarios de estrés
+parametrizados con la beta y la exposición USD, las cargas factoriales por
+regresión, las correlaciones, la bitácora de operaciones y el diagnóstico.
 
-Los colores de resultado se eligieron por contraste medido, no por apariencia:
-`#22c55e` y `#ef4444` para cifras —ambos por encima de 4.5:1— mientras que los
-tonos de estado `#0ca30c` y `#d03b3b` quedan para rellenos, donde el umbral
-aplicable es 3:1. El morado institucional queda reservado para cromo: a 1.71:1
-nunca porta texto. La dirección se marca además con `▲`/`▼`, de modo que el
-signo no dependa sólo del color.
+Si se regenera el HTML desde el componente de diseño, verificar que
+`datos_reales.py` siga encontrando sus anclas.
+
+## Despliegue
+
+Streamlit Community Cloud → New app → este repo, rama `main`,
+**Main file path: `app.py`**. La primera carga tarda ~1 minuto (descarga ~47
+tickers); después el caché de 5 minutos la hace fluida.
 
 ---
 
