@@ -561,6 +561,7 @@ def inyectar(html: str, d: dict) -> str:
 
     # --- 8. capa interactiva: tooltips y crosshair ------------------------
     html = _capa_interactiva(html, d, serie_perf, serie_dd)
+    html = _tabla_posiciones(html)
 
     # --- 9. sello de fecha/hora en la cabecera ---------------------------
     ahora = datetime.now()
@@ -799,6 +800,79 @@ def _js_plano(v) -> str:
     if isinstance(v, dict):
         return "{" + ",".join(f"{k}:{_js_plano(x)}" for k, x in v.items()) + "}"
     raise TypeError(f"No serializable: {type(v)}")
+
+
+# --------------------------------------------------------------------------
+# Tabla de posiciones: rendimiento del dia y acumulado como columnas insignia
+# --------------------------------------------------------------------------
+# Ambos numeros ya existian pero como texto plano y con encabezados ambiguos
+# ("Var. dia", "Rend."). Se convierten en columnas de primera clase: el
+# rendimiento del dia como pildora con flecha y fondo tintado por signo, y el
+# acumulado como valor mas barra de magnitud (escalada al mayor |rend| de la
+# cartera), de modo que el ojo compare emisoras sin leer cada cifra. La fila
+# completa gana ficha al pasar el cursor.
+
+def _tabla_posiciones(html: str) -> str:
+    # ---- datos: campos nuevos en posRows ---------------------------------
+    html = _sub(html,
+        "const posRows = rows.map(r => ({",
+        "const maxAbsRend = Math.max(...rows.map(r => Math.abs(r.rend))) || 1; "
+        "const posRows = rows.map(r => ({")
+    html = _sub(html,
+        "varDia: this.fPct(r.vd), varColor: this.col(r.vd),",
+        "varDia: this.fPct(r.vd), varColor: this.col(r.vd), "
+        "vdArrow: this.arrow(r.vd), "
+        "vdBg: r.vd > 0 ? 'color-mix(in srgb, var(--pos) 13%, transparent)' "
+        ": r.vd < 0 ? 'color-mix(in srgb, var(--neg) 13%, transparent)' : 'var(--surf3)', "
+        "tipFila: r.emisora + '|Rend. d\\u00eda ' + this.fPct(r.vd) + ' \\u00b7 ' + this.fMoney(r.pnlDia) "
+        "+ '|Rend. acumulado ' + this.fPct(r.rend) + ' \\u00b7 P&L ' + this.fMoney(r.pnl) "
+        "+ '|Peso ' + r.peso.toFixed(2) + ' %',")
+    html = _sub(html,
+        "rend: this.fPct(r.rend), rendColor: this.col(r.rend),",
+        "rend: this.fPct(r.rend), rendColor: this.col(r.rend), "
+        "rendW: (Math.abs(r.rend) / maxAbsRend * 100).toFixed(1), "
+        "rendBarColor: r.rend >= 0 ? 'var(--pos)' : 'var(--neg)',")
+
+    # ---- encabezados explicitos -----------------------------------------
+    html = _sub(html, 'padding:9px 10px\\">Var. día<',
+                'padding:9px 10px\\">Rend. día<')
+    html = _sub(html, 'padding:9px 10px\\">Rend.<',
+                'padding:9px 10px\\">Rend. acumulado<')
+
+    # ---- celda del dia: pildora con flecha y fondo por signo -------------
+    html = _sub(html,
+        '<sc-raw-td style=\\"padding:7px 10px;text-align:right;font-family:var(--mono);'
+        'color:{{ r.varColor }}\\">{{ r.varDia }}<\\u002Fsc-raw-td>',
+        '<sc-raw-td style=\\"padding:5px 10px;text-align:right\\">'
+        '<span style=\\"display:inline-block;min-width:76px;text-align:right;'
+        'padding:3px 8px;border-radius:4px;background:{{ r.vdBg }};'
+        'color:{{ r.varColor }};font-family:var(--mono);font-weight:600\\">'
+        '{{ r.vdArrow }}{{ r.varDia }}<\\u002Fspan><\\u002Fsc-raw-td>')
+
+    # ---- celda del acumulado: valor + barra de magnitud ------------------
+    html = _sub(html,
+        '<sc-raw-td style=\\"padding:7px 10px;text-align:right;font-family:var(--mono);'
+        'color:{{ r.rendColor }}\\">{{ r.rend }}<\\u002Fsc-raw-td>',
+        '<sc-raw-td style=\\"padding:5px 10px;text-align:right\\">'
+        '<div style=\\"display:flex;align-items:center;justify-content:flex-end;gap:7px\\">'
+        '<div style=\\"width:46px;height:5px;background:var(--surf3);'
+        'border-radius:3px;overflow:hidden\\">'
+        '<div style=\\"width:{{ r.rendW }}%;height:100%;background:{{ r.rendBarColor }};'
+        'border-radius:3px\\"><\\u002Fdiv><\\u002Fdiv>'
+        '<span style=\\"font-family:var(--mono);font-weight:600;min-width:64px;'
+        'color:{{ r.rendColor }}\\">{{ r.rend }}<\\u002Fspan>'
+        '<\\u002Fdiv><\\u002Fsc-raw-td>')
+
+    # ---- ficha de la fila al pasar el cursor -----------------------------
+    html = _sub(html,
+        'list=\\"{{ posRows }}\\" as=\\"r\\" hint-placeholder-count=\\"14\\">\\n'
+        '            <sc-raw-tr style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">',
+        'list=\\"{{ posRows }}\\" as=\\"r\\" hint-placeholder-count=\\"14\\">\\n'
+        '            <sc-raw-tr data-tip=\\"{{ r.tipFila }}\\" '
+        'style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">')
+    return html
 
 
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
