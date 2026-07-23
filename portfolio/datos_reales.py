@@ -647,6 +647,9 @@ def inyectar(html: str, d: dict) -> str:
         serie_curva = deu.pop("serieCurva", None)
         serie_udinom = deu.pop("serieUdinom", None)
         html = _seccion_deuda(html, deu)
+        pc = _cartera_rf()
+        if pc is not None:
+            html = _seccion_cartera(html, pc)
 
     # --- 7b. riesgo explicativo (antes de la capa interactiva) ------------
     html = _riesgo_explicativo(html)
@@ -2501,6 +2504,378 @@ def _verificar_bundle(html: str) -> None:
                 f"Inyeccion invalida: el bloque {m.group(1)} dejo de ser "
                 f"JSON en la posicion {e.pos}: "
                 f"...{contenido[max(0, e.pos - 60):e.pos + 30]!r}...") from e
+
+
+# --------------------------------------------------------------------------
+# Cartera de renta fija y ALM: cuarta pestana del grupo de deuda
+# --------------------------------------------------------------------------
+# Posiciones propias de deuda valuadas contra el vector (DV01 monetario),
+# posicionamiento KRD contra el benchmark gubernamental por circulacion,
+# calce ALM real contra el pasivo y estructuras DV01-neutral listas para
+# boleta. La cartera vive en data/posiciones_deuda.csv y el pasivo en
+# data/pasivo_real.csv, ambos editables.
+
+from . import deuda_port as dpo
+
+
+def _cartera_rf() -> dict | None:
+    dv = bn.cargar()
+    if dv is None:
+        return None
+    cart = dpo.valuar_cartera(dv)
+    if not len(cart):
+        return None
+
+    total = float(cart["valor"].sum())
+    dv01_tot = float(cart["dv01"].sum())
+    dur_pond = float((cart["DURACION"] * cart["valor"]).sum() / total)
+    carry_anual = float((cart["ytm"] * cart["valor"]).sum() / total)
+    pnl = float(cart["pnl"].sum())
+    hist = bn.historico_metricas()
+    te = dpo.te_ex_ante(hist)
+
+    filas = []
+    for r in cart.itertuples():
+        ok = bool(r.encontrado)
+        filas.append(dict(
+            clase=str(r.tipo_valor), serie=str(r.serie),
+            titF=f"{r.titulos:,.0f}",
+            costoF=f"{r.costo_unit:,.3f}" if ok else "—",
+            sucioF=f"{r.sucio:,.3f}" if ok else "sin precio",
+            valorF=f"{r.valor:,.0f}" if ok else "—",
+            ytmF=f"{r.ytm:.2f} %" if ok else "—",
+            durF=f"{r.DURACION:.2f}" if ok else "—",
+            dv01F=f"{r.dv01:,.0f}" if ok else "—",
+            pesoF=f"{r.peso_pct:.1f} %" if ok else "—",
+            pnlF=f"{r.pnl:+,.0f}" if ok else "—",
+            pnlC=("var(--pos)" if ok and r.pnl >= 0 else "var(--neg)"),
+            tip=(f"{r.tipo_valor} {r.serie}|{r.titulos:,.0f} títulos · "
+                 f"valor {r.valor:,.0f}|DV01 {r.dv01:,.0f} MXN/pb · "
+                 f"dur {r.DURACION:.2f}" if ok else
+                 f"{r.tipo_valor} {r.serie}|No está en el vector vigente")))
+
+    pos = dpo.posicionamiento_krd(dv, cart)
+    max_k = float(max(pos["port_pct"].max(), pos["bench_pct"].max())) or 1.0
+    krd_rows = [dict(
+        cubeta=r.cubeta,
+        wPort=f"{r.port_pct / max_k * 100:.0f}",
+        wBench=f"{r.bench_pct / max_k * 100:.0f}",
+        portF=f"{r.port_pct:.0f}%", benchF=f"{r.bench_pct:.0f}%",
+        actF=f"{r.activo_pp:+.0f} pp",
+        actC="var(--pos)" if r.activo_pp > 0 else "var(--neg)",
+        tip=(f"Cubeta {r.cubeta}|Portafolio {r.port_pct:.1f} % del DV01 "
+             f"({r.port_mxn:,.0f} MXN/pb)|Benchmark {r.bench_pct:.1f} % · "
+             f"activo {r.activo_pp:+.1f} pp"))
+        for r in pos.itertuples()]
+
+    alm = dpo.alm_real(dv, cart)
+    alm_kpis, alm_rows, repl_rows, alm_nota = [], [], [], ""
+    if alm:
+        cobertura = (alm["dv01_activo"] / alm["dv01_pasivo"] * 100.0
+                     if alm["dv01_pasivo"] else 0.0)
+        alm_kpis = [
+            dict(label="PV pasivo real", value=f"${alm['pv_pasivo']/1e6:,.1f} M"),
+            dict(label="Dur. real pasivo", value=f"{alm['dur_pasivo']:.1f}a"),
+            dict(label="DV01 pasivo", value=f"{alm['dv01_pasivo']:,.0f}"),
+            dict(label="DV01 activo real", value=f"{alm['dv01_activo']:,.0f}"),
+            dict(label="Cobertura", value=f"{cobertura:.0f} %"),
+        ]
+        mx_a = float(alm["cubetas"][["pasivo", "activo"]].values.max()) or 1.0
+        for r in alm["cubetas"].itertuples():
+            alm_rows.append(dict(
+                cubeta=r.cubeta,
+                wPas=f"{r.pasivo / mx_a * 100:.0f}",
+                wAct=f"{r.activo / mx_a * 100:.0f}",
+                brechaF=f"{r.brecha:+,.0f}",
+                brechaC="var(--pos)" if abs(r.brecha) < mx_a * 0.1 else "var(--neg)",
+                tip=(f"Cubeta {r.cubeta}|KRD pasivo {r.pasivo:,.0f} · "
+                     f"activo {r.activo:,.0f}|Brecha {r.brecha:+,.0f} MXN/pb")))
+        for r in alm["replicante"].itertuples():
+            repl_rows.append(dict(
+                serie=str(r.serie), aniosF=f"{r.anios:.1f}a",
+                realF=f"{r.real:.2f} %",
+                invF=f"${r.inversion/1e6:,.1f} M"))
+        alm_nota = (
+            f"Pasivo: flujos reales anuales de data/pasivo_real.csv "
+            f"descontados con la curva real de Udibonos del vector. La "
+            f"cobertura de hoy es {cobertura:.0f} % del DV01 real del "
+            f"pasivo; la brecha se concentra en las cubetas largas. La "
+            f"cartera replicante reparte la inversión en Udibonos que "
+            f"igualaría las KRD del pasivo (mínimos cuadrados, sin cortos).")
+
+    ests = dpo.estructuras_dv01(dv)
+    est_rows = []
+    for e in ests:
+        patas = [dict(sentido=p["sentido"], serie=p["serie"],
+                      titF=f"{p['titulos']:,.0f}",
+                      ytmF=f"{p['ytm']:.2f} %",
+                      dv01F=f"{p['dv01']:+,.0f}",
+                      sentC=("var(--pos)" if p["sentido"] == "Compra"
+                             else "var(--warn)"))
+                 for p in e["patas"]]
+        est_rows.append(dict(
+            nombre=e["nombre"], senal=e["senal"], patas=patas,
+            netoF=f"DV01 neto {e['dv01_neto']:+,.0f}",
+            carryF=f"carry+roll 3m {e['carry3m_neto']:+,.0f} MXN",
+            carryC=("var(--pos)" if e["carry3m_neto"] >= 0 else "var(--neg)"),
+            tip=(f"{e['nombre']}|DV01 bruto {e['dv01_bruto']:,.0f} MXN/pb · "
+                 f"neto {e['dv01_neto']:+,.0f}|Carry+roll 3 meses "
+                 f"{e['carry3m_neto']:+,.0f} MXN")))
+
+    return dict(
+        kpis=[
+            dict(label="Valor cartera RF", value=f"${total/1e6:,.1f} M"),
+            dict(label="DV01 total", value=f"{dv01_tot:,.0f} MXN/pb"),
+            dict(label="Duración", value=f"{dur_pond:.2f}"),
+            dict(label="Carry anual est.", value=f"{carry_anual:.2f} %"),
+            dict(label="P&L vs costo", value=f"{pnl:+,.0f}"),
+            dict(label="TE ex-ante",
+                 value=(f"{te:.0f} pb" if te is not None
+                        else f"— ({len(hist)} ses.)")),
+        ],
+        filas=filas, krdRows=krd_rows,
+        almKpis=alm_kpis, almRows=alm_rows, replRows=repl_rows,
+        almNota=alm_nota, estructuras=est_rows,
+        notaKrd=("DV01 por cubeta clave (2/5/10/20/30a), repartido "
+                 "linealmente entre las cubetas que flanquean cada "
+                 "posición, contra el benchmark gubernamental de Bonos M "
+                 "ponderado por monto en circulación del vector. La barra "
+                 "morada es el portafolio; la gris, el benchmark."),
+        notaCartera=("Cartera registrada en data/posiciones_deuda.csv "
+                     "(boletas C/V neteadas con costo promedio) y valuada "
+                     "con el PRECIO SUCIO oficial del vector vigente. El "
+                     "TE ex-ante se activa al acumular 20 sesiones de "
+                     "vectores. Análisis de mesa; no constituye una "
+                     "recomendación de inversión."),
+    )
+
+
+def _seccion_cartera(html: str, pc: dict) -> str:
+    # ---- navegacion, titulo y bandera ------------------------------------
+    html = _sub(html,
+        "['deuda-val','Valuación · Crédito','12'],"
+        "['#','General'],['configuracion','Configuración','13']",
+        "['deuda-val','Valuación · Crédito','12'],"
+        "['deuda-port','Cartera · ALM','13'],"
+        "['#','General'],['configuracion','Configuración','14']")
+    html = _sub(html,
+        "configuracion: ['Configuración', 'Fuentes de datos",
+        "'deuda-port': ['Renta fija · Cartera y ALM', 'Posiciones propias, "
+        "DV01 por cubeta vs benchmark, calce del pasivo real y estructuras "
+        "DV01-neutral'], "
+        "configuracion: ['Configuración', 'Fuentes de datos")
+    html = _sub(html,
+        "isDeudaVal: this.state.tab === 'deuda-val', ",
+        "isDeudaVal: this.state.tab === 'deuda-val', "
+        "isDeudaPort: this.state.tab === 'deuda-port', "
+        "pcart: " + js(pc) + ", ")
+
+    TD = '<\\u002Fdiv>'
+    card = ('background:var(--surf);border:1px solid var(--border);'
+            'border-radius:6px;padding:14px 16px')
+    header = ('font:700 10px/1 var(--sans);letter-spacing:.14em;'
+              'text-transform:uppercase;color:var(--ink3);margin-bottom:12px')
+    nota = ('font:400 10.5px/1.55 var(--sans);color:var(--ink3);'
+            'margin-top:10px;border-top:1px dashed var(--border);'
+            'padding-top:8px')
+    th = ('text-align:right;font:700 9px/1 var(--sans);'
+          'letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);'
+          'padding:8px 9px')
+    th_izq = th.replace('text-align:right', 'text-align:left')
+    td = 'padding:6px 9px;text-align:right;font-family:var(--mono)'
+
+    seccion = (
+        '<!-- ================= RF CARTERA ================= -->\\n'
+        '      <sc-if value=\\"{{ isDeudaPort }}\\" '
+        'hint-placeholder-val=\\"{{ false }}\\">\\n'
+        # KPIs
+        '      <div style=\\"display:grid;'
+        'grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px\\">'
+        '<sc-for list=\\"{{ pcart.kpis }}\\" as=\\"k\\" '
+        'hint-placeholder-count=\\"6\\">'
+        '<div style=\\"' + card.replace('padding:14px 16px',
+                                        'padding:10px 12px') + '\\">'
+        '<div style=\\"font:600 8.5px/1 var(--sans);letter-spacing:.1em;'
+        'text-transform:uppercase;color:var(--ink3)\\">{{ k.label }}' + TD +
+        '<div style=\\"font:600 14.5px/1.3 var(--mono);color:var(--ink);'
+        'margin-top:4px\\">{{ k.value }}' + TD + TD + '<\\u002Fsc-for>' + TD
+        + '\\n'
+        # tabla de posiciones
+        '      <div style=\\"' + card.replace('padding:14px 16px',
+                                              'padding:0;overflow:hidden')
+        + ';margin-bottom:14px\\">'
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Instrumento'
+        '<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Títulos<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Costo<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Sucio hoy<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Valor<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">YTM<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Dur.<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">DV01<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Peso<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">P&amp;L<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ pcart.filas }}\\" as=\\"f\\" '
+        'hint-placeholder-count=\\"7\\">'
+        '<sc-raw-tr data-tip=\\"{{ f.tip }}\\" '
+        'style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:6px 9px;font:600 10.5px var(--mono);'
+        'color:var(--ink)\\">{{ f.clase }} {{ f.serie }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.titF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink3)\\">'
+        '{{ f.costoF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.sucioF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ f.valorF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--ink)\\">{{ f.ytmF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.durF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.dv01F }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.pesoF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:{{ f.pnlC }}\\">{{ f.pnlF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
+        # KRD vs benchmark | ALM
+        '      <div style=\\"display:grid;grid-template-columns:1fr 1.2fr;'
+        'gap:14px;margin-bottom:14px\\">\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">DV01 por cubeta vs benchmark'
+        '<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\"> · % del DV01 total<\\u002Fspan>' + TD +
+        '<sc-for list=\\"{{ pcart.krdRows }}\\" as=\\"r\\" '
+        'hint-placeholder-count=\\"5\\">'
+        '<div data-tip=\\"{{ r.tip }}\\" style=\\"display:flex;'
+        'align-items:center;gap:8px;margin-bottom:8.5px\\">'
+        '<div style=\\"width:34px;font-family:var(--mono);font-size:10.5px;'
+        'color:var(--ink2)\\">{{ r.cubeta }}' + TD +
+        '<div style=\\"flex:1\\">'
+        '<div style=\\"display:flex;align-items:center;gap:5px;'
+        'margin-bottom:3px\\">'
+        '<div style=\\"height:8px;width:{{ r.wPort }}%;'
+        'background:var(--brand-lite);border-radius:2px\\">' + TD +
+        '<span style=\\"font-family:var(--mono);font-size:9px;'
+        'color:var(--ink3)\\">{{ r.portF }}<\\u002Fspan>' + TD +
+        '<div style=\\"display:flex;align-items:center;gap:5px\\">'
+        '<div style=\\"height:8px;width:{{ r.wBench }}%;'
+        'background:var(--border2);border-radius:2px\\">' + TD +
+        '<span style=\\"font-family:var(--mono);font-size:9px;'
+        'color:var(--ink3)\\">{{ r.benchF }}<\\u002Fspan>' + TD + TD +
+        '<div style=\\"width:52px;text-align:right;'
+        'font-family:var(--mono);font-size:10px;font-weight:600;'
+        'color:{{ r.actC }}\\">{{ r.actF }}' + TD + TD + '<\\u002Fsc-for>'
+        '<div style=\\"' + nota + '\\">{{ pcart.notaKrd }}' + TD + TD + '\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Calce ALM real · activo vs pasivo'
+        + TD +
+        '<div style=\\"display:grid;grid-template-columns:repeat(5,1fr);'
+        'gap:8px;margin-bottom:12px\\">'
+        '<sc-for list=\\"{{ pcart.almKpis }}\\" as=\\"k\\" '
+        'hint-placeholder-count=\\"5\\">'
+        '<div style=\\"background:var(--surf2);border-radius:5px;'
+        'padding:8px 10px\\">'
+        '<div style=\\"font:600 8px/1 var(--sans);letter-spacing:.08em;'
+        'text-transform:uppercase;color:var(--ink3)\\">{{ k.label }}' + TD +
+        '<div style=\\"font:600 12.5px/1.3 var(--mono);color:var(--ink);'
+        'margin-top:3px\\">{{ k.value }}' + TD + TD + '<\\u002Fsc-for>' + TD +
+        '<sc-for list=\\"{{ pcart.almRows }}\\" as=\\"r\\" '
+        'hint-placeholder-count=\\"5\\">'
+        '<div data-tip=\\"{{ r.tip }}\\" style=\\"display:flex;'
+        'align-items:center;gap:8px;margin-bottom:7.5px\\">'
+        '<div style=\\"width:34px;font-family:var(--mono);font-size:10.5px;'
+        'color:var(--ink2)\\">{{ r.cubeta }}' + TD +
+        '<div style=\\"flex:1\\">'
+        '<div style=\\"height:7px;width:{{ r.wPas }}%;'
+        'background:var(--neg);opacity:.75;border-radius:2px;'
+        'margin-bottom:3px\\">' + TD +
+        '<div style=\\"height:7px;width:{{ r.wAct }}%;'
+        'background:var(--pos);border-radius:2px\\">' + TD + TD +
+        '<div style=\\"width:74px;text-align:right;'
+        'font-family:var(--mono);font-size:9.5px;font-weight:600;'
+        'color:{{ r.brechaC }}\\">{{ r.brechaF }}' + TD + TD +
+        '<\\u002Fsc-for>'
+        '<div style=\\"display:flex;gap:12px;font-family:var(--mono);'
+        'font-size:9.5px;color:var(--ink3);margin-top:2px\\">'
+        '<span>■ rojo: KRD pasivo<\\u002Fspan>'
+        '<span style=\\"color:var(--pos)\\">■ verde: KRD activo real'
+        '<\\u002Fspan>' + TD +
+        '<div style=\\"' + nota + '\\">{{ pcart.almNota }}' + TD + TD + TD
+        + '\\n'
+        # replicante | estructuras
+        '      <div style=\\"display:grid;grid-template-columns:1fr 1.6fr;'
+        'gap:14px\\">\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Cartera replicante del pasivo'
+        + TD +
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Udibono<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Plazo<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Real<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Inversión<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ pcart.replRows }}\\" as=\\"r\\" '
+        'hint-placeholder-count=\\"13\\">'
+        '<sc-raw-tr style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:5px 9px;font:600 10.5px var(--mono);'
+        'color:var(--ink)\\">{{ r.serie }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ r.aniosF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ r.realF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--ink)\\">{{ r.invF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Estructuras DV01-neutral'
+        '<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\"> · pata principal 10,000 títulos'
+        '<\\u002Fspan>' + TD +
+        '<sc-for list=\\"{{ pcart.estructuras }}\\" as=\\"e\\" '
+        'hint-placeholder-count=\\"3\\">'
+        '<div data-tip=\\"{{ e.tip }}\\" style=\\"background:var(--surf2);'
+        'border-radius:6px;padding:10px 12px;margin-bottom:9px\\">'
+        '<div style=\\"display:flex;justify-content:space-between;'
+        'align-items:baseline;gap:10px;flex-wrap:wrap\\">'
+        '<div style=\\"font:600 11.5px/1.3 var(--sans);'
+        'color:var(--ink)\\">{{ e.nombre }}' + TD +
+        '<div style=\\"font:600 10.5px var(--mono);'
+        'color:{{ e.carryC }}\\">{{ e.carryF }}' + TD + TD +
+        '<div style=\\"font:400 10px/1.4 var(--sans);color:var(--ink3);'
+        'margin:3px 0 7px\\">{{ e.senal }} · {{ e.netoF }}' + TD +
+        '<sc-for list=\\"{{ e.patas }}\\" as=\\"p\\" '
+        'hint-placeholder-count=\\"3\\">'
+        '<div style=\\"display:flex;gap:10px;font-family:var(--mono);'
+        'font-size:10.5px;padding:2px 0\\">'
+        '<span style=\\"width:52px;font-weight:700;'
+        'color:{{ p.sentC }}\\">{{ p.sentido }}<\\u002Fspan>'
+        '<span style=\\"width:56px;color:var(--ink)\\">{{ p.serie }}'
+        '<\\u002Fspan>'
+        '<span style=\\"width:90px;text-align:right;'
+        'color:var(--ink2)\\">{{ p.titF }} tít.<\\u002Fspan>'
+        '<span style=\\"width:64px;text-align:right;'
+        'color:var(--ink2)\\">{{ p.ytmF }}<\\u002Fspan>'
+        '<span style=\\"flex:1;text-align:right;color:var(--ink3)\\">'
+        'DV01 {{ p.dv01F }}<\\u002Fspan>' + TD + '<\\u002Fsc-for>' + TD +
+        '<\\u002Fsc-for>'
+        '<div style=\\"' + nota + '\\">{{ pcart.notaCartera }}' + TD + TD +
+        TD + '\\n'
+        '      <\\u002Fsc-if>\\n\\n      ')
+
+    html = _sub(html,
+        '<!-- ================= CONFIGURACIÓN ================= -->',
+        seccion + '<!-- ================= CONFIGURACIÓN ================= -->')
+    return html
 
 
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
