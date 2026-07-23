@@ -645,13 +645,15 @@ def inyectar(html: str, d: dict) -> str:
     serie_curva = None
     if deu is not None:
         serie_curva = deu.pop("serieCurva", None)
+        serie_udinom = deu.pop("serieUdinom", None)
         html = _seccion_deuda(html, deu)
 
     # --- 7b. riesgo explicativo (antes de la capa interactiva) ------------
     html = _riesgo_explicativo(html)
 
     # --- 8. capa interactiva: tooltips y crosshair ------------------------
-    html = _capa_interactiva(html, d, serie_perf, serie_dd, serie_curva)
+    html = _capa_interactiva(html, d, serie_perf, serie_dd, serie_curva,
+                             serie_udinom)
     html = _tabla_posiciones(html)
 
     # --- 9. sello de fecha/hora en la cabecera ---------------------------
@@ -675,7 +677,8 @@ def inyectar(html: str, d: dict) -> str:
 
 def _capa_interactiva(html: str, d: dict, serie_perf: dict,
                       serie_dd: dict,
-                      serie_curva: dict | None = None) -> str:
+                      serie_curva: dict | None = None,
+                      serie_udinom: dict | None = None) -> str:
     # ---- 1. atributos data-tip en el template (marcado escapado) ---------
     plantilla = [
         # treemap: mosaico por emisora y cabecera de sector
@@ -771,7 +774,9 @@ def _capa_interactiva(html: str, d: dict, serie_perf: dict,
     series = ("<script>window.__SERIES__ = "
               + _js_plano(dict(perf=serie_perf, dd=serie_dd,
                                **({"curva": serie_curva}
-                                  if serie_curva else {})))
+                                  if serie_curva else {}),
+                               **({"udinom": serie_udinom}
+                                  if serie_udinom else {})))
               + ";</script>")
     runtime = """
 <script>
@@ -1752,6 +1757,86 @@ def _deuda() -> dict | None:
             detalle=(f"Cifras de hace {rezago} día(s). Sube el vector de "
                      f"hoy con el cargador de la parte superior.")))
 
+    # ---- udibonos en escala nominal (comparativo contra Bonos M) ---------
+    ESCENARIOS_PI = (3.0, 3.5, 4.0)
+    un = bn.udibonos_nominalizados(dv, ESCENARIOS_PI)
+
+    W2, H2, mL2, mR2, mT2, mB2 = 980.0, 300.0, 50.0, 66.0, 16.0, 30.0
+    u_lo = float(np.floor(un["nom_3.0"].min())) - 0.4
+    u_hi = float(np.ceil(dv["bonos_m"]["ytm"].max())) + 0.3
+
+    def X2(t):
+        return mL2 + (max(t, 0.0) / t_max) ** 0.5 * (W2 - mL2 - mR2)
+
+    def Y2(y):
+        return mT2 + (u_hi - y) / (u_hi - u_lo) * (H2 - mT2 - mB2)
+
+    linea_m2 = " ".join(f"{X2(t):.1f},{Y2(y):.1f}" for t, y in
+                        zip(dv["bonos_m"]["anios"], dv["bonos_m"]["ytm"]))
+    lineas_pi = {}
+    for pi in ESCENARIOS_PI:
+        lineas_pi[pi] = " ".join(
+            f"{X2(t):.1f},{Y2(y):.1f}" for t, y in
+            zip(un["anios"], un[f"nom_{pi:.1f}"]))
+
+    u_gmay = [dict(y=f"{Y2(v):.1f}", label=f"{v:.0f}%")
+              for v in np.arange(np.ceil(u_lo), u_hi, 1.0)]
+    u_ticks = [dict(x=f"{X2(t):.1f}", label=lab)
+               for t, lab in [(1, "1a"), (2, "2a"), (5, "5a"), (10, "10a"),
+                              (20, "20a"), (28.5, "30a")] if t <= t_max]
+    fin_x = f"{X2(float(un['anios'].max())):.1f}"
+    etiquetas_pi = [dict(x=fin_x, y=f"{Y2(float(un[f'nom_{pi:.1f}'].iloc[-1])):.1f}",
+                         label=f"π {pi:.1f} %")
+                    for pi in ESCENARIOS_PI]
+    fin_m_y = f"{Y2(float(dv['bonos_m']['ytm'].iloc[-1])):.1f}"
+
+    udinom = dict(lineaM=linea_m2,
+                  l30=lineas_pi[3.0], l35=lineas_pi[3.5], l40=lineas_pi[4.0],
+                  gMay=u_gmay, ticksX=u_ticks,
+                  etiquetasPi=etiquetas_pi, finX=f"{X2(t_max):.1f}",
+                  finMy=fin_m_y)
+
+    # crosshair del comparativo
+    an_u = un["anios"].values
+    n_u = 80
+    tips_u = []
+    for i in range(n_u):
+        t = ((i / (n_u - 1)) ** 2) * t_max
+        m_ = float(np.interp(t, an_, yt_))
+        if t >= float(an_u.min()):
+            partes = [f"{t:.1f} años", f"Bono M {m_:.2f} %"]
+            for pi in ESCENARIOS_PI:
+                nv = float(np.interp(t, an_u, un[f"nom_{pi:.1f}"].values))
+                partes.append(f"UDI π{pi:.1f}%: {nv:.2f} % "
+                              f"({(nv - m_) * 100:+.0f} pb)")
+            be_ = float(np.interp(t, an_u, un["be_nodo"].values))
+            partes.append(f"π de indiferencia: {be_:.2f} %")
+            tips_u.append("|".join(partes))
+        else:
+            tips_u.append(f"{t:.2f} años|Bono M {m_:.2f} %")
+    serie_udinom_hover = dict(W=980, padL=int(mL2), padR=int(mR2),
+                              n=n_u, tips=tips_u)
+
+    # tabla de decision por nodo
+    udinom_filas = []
+    for r_ in un.itertuples():
+        v30 = getattr(r_, "vent_3.0", None)
+        celdas_v = {}
+        for pi in ESCENARIOS_PI:
+            v = float(un.loc[un["serie"] == r_.serie,
+                             f"vent_{pi:.1f}"].iloc[0])
+            clave = f"v{str(pi).replace('.', '')}"
+            celdas_v[clave + "F"] = f"{v:+.0f}"
+            celdas_v[clave + "C"] = ("var(--pos)" if v > 0 else "var(--neg)")
+        udinom_filas.append(dict(
+            serie=r_.serie, aniosF=f"{r_.anios:.1f}",
+            realF=f"{r_.real:.2f} %", mF=f"{r_.m_interp:.2f} %",
+            beF=f"{r_.be_nodo:.2f} %",
+            tip=(f"UDIBONO {r_.serie}|Real {r_.real:.2f} % · M mismo plazo "
+                 f"{r_.m_interp:.2f} %|Gana al nominal sólo si la inflación "
+                 f"promedio de {r_.anios:.0f} años supera {r_.be_nodo:.2f} %"),
+            **celdas_v))
+
     fwd_txt = " · ".join(f"{f['t1']}a→{f['t2']}a {f['fwd']:.2f} %"
                          for f in fwds)
 
@@ -1816,7 +1901,8 @@ def _deuda() -> dict | None:
             dict(label="BE 10a", value=f"{a['be10']:.2f} %"),
             dict(label="Fondeo (91d)", value=f"{fondeo:.2f} %"),
         ],
-        curva=curva, serieCurva=serie_curva,
+        curva=curva, serieCurva=serie_curva, udinom=udinom,
+        serieUdinom=serie_udinom_hover, udinomFilas=udinom_filas,
         stBuckets=st_buckets, niveles=niveles,
         histRows=hist_rows, histNota=hist_nota, histN=f"{n_hist}",
         richCheap=rich_cheap, escenarios=escenarios,
@@ -1840,6 +1926,13 @@ def _deuda() -> dict | None:
                         "paralelos. Verde gana al CETE de 1a; la fila donde "
                         "el verde resiste +100 pb es la extensión "
                         "defendible."),
+        notaUdinom=("Curva de Udibonos transformada a tasa nominal "
+                    "equivalente con Fisher exacto bajo tres escenarios de "
+                    "inflación promedio (π). Donde la línea del escenario "
+                    "queda ARRIBA de la curva M, el udibono gana al nominal "
+                    "en ese plazo bajo ese escenario; abajo, pierde. La π "
+                    "de indiferencia de cada nodo es su breakeven: el "
+                    "escenario que iguala ambas curvas."),
         notaFvf=("Fijo contra flotante por plazo: pb de alza PROMEDIO del "
                  "fondeo que hacen falta para que el BONDES F gane al Bono "
                  "M. Verde: el fijo tiene colchón amplio; rojo: el "
@@ -2157,6 +2250,86 @@ def _seccion_deuda(html: str, deu: dict) -> str:
         '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>'
         '<div style=\\"' + nota + '\\">{{ deu.notaEscenarios }}' + TD + TD
         + '\\n'
+        # udibonos nominalizados vs bonos M
+        '      <div style=\\"' + card + ';margin-bottom:14px\\">'
+        '<div style=\\"' + header + '\\">Udibonos en escala nominal vs '
+        'Bonos M<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\"> · Fisher exacto por escenario de inflación '
+        'promedio<\\u002Fspan>' + TD +
+        '<svg viewBox=\\"0 0 980 300\\" style=\\"width:100%;height:auto\\">'
+        '<sc-for list=\\"{{ deu.udinom.gMay }}\\" as=\\"g\\" '
+        'hint-placeholder-count=\\"5\\">'
+        '<line x1=\\"50\\" y1=\\"{{ g.y }}\\" x2=\\"914\\" '
+        'y2=\\"{{ g.y }}\\" stroke=\\"var(--border)\\" '
+        'stroke-dasharray=\\"2 4\\"><\\u002Fline>'
+        '<text x=\\"8\\" y=\\"{{ g.y }}\\" font-family=\\"var(--mono)\\" '
+        'font-size=\\"9.5\\" fill=\\"var(--ink3)\\" dy=\\"3\\">'
+        '{{ g.label }}<\\u002Ftext><\\u002Fsc-for>'
+        '<sc-for list=\\"{{ deu.udinom.ticksX }}\\" as=\\"tx\\" '
+        'hint-placeholder-count=\\"6\\">'
+        '<text x=\\"{{ tx.x }}\\" y=\\"292\\" text-anchor=\\"middle\\" '
+        'font-family=\\"var(--mono)\\" font-size=\\"9.5\\" '
+        'fill=\\"var(--ink3)\\">{{ tx.label }}<\\u002Ftext><\\u002Fsc-for>'
+        '<polyline data-chart=\\"udinom\\" '
+        'points=\\"{{ deu.udinom.lineaM }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--brand-lite)\\" stroke-width=\\"2.6\\">'
+        '<\\u002Fpolyline>'
+        '<polyline points=\\"{{ deu.udinom.l30 }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--pos)\\" stroke-width=\\"1.8\\" opacity=\\".65\\" '
+        'stroke-dasharray=\\"3 5\\"><\\u002Fpolyline>'
+        '<polyline points=\\"{{ deu.udinom.l35 }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--pos)\\" stroke-width=\\"2\\" opacity=\\".85\\" '
+        'stroke-dasharray=\\"9 5\\"><\\u002Fpolyline>'
+        '<polyline points=\\"{{ deu.udinom.l40 }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--pos)\\" stroke-width=\\"2.4\\"><\\u002Fpolyline>'
+        '<text x=\\"{{ deu.udinom.finX }}\\" '
+        'y=\\"{{ deu.udinom.finMy }}\\" dy=\\"4\\" '
+        'font-family=\\"var(--mono)\\" font-size=\\"9\\" '
+        'font-weight=\\"700\\" fill=\\"var(--brand-lite)\\">Bonos M'
+        '<\\u002Ftext>'
+        '<sc-for list=\\"{{ deu.udinom.etiquetasPi }}\\" as=\\"e\\" '
+        'hint-placeholder-count=\\"3\\">'
+        '<text x=\\"{{ e.x }}\\" y=\\"{{ e.y }}\\" dx=\\"6\\" dy=\\"3\\" '
+        'font-family=\\"var(--mono)\\" font-size=\\"9\\" '
+        'font-weight=\\"700\\" fill=\\"var(--pos)\\">{{ e.label }}'
+        '<\\u002Ftext><\\u002Fsc-for><\\u002Fsvg>'
+        '<div style=\\"' + nota + '\\">{{ deu.notaUdinom }}' + TD +
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px;margin-top:10px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Udibono<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Años<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Real<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">M mismo plazo<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">π indiferencia'
+        '<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">vs M @3.0% (pb)'
+        '<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">@3.5%<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">@4.0%<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.udinomFilas }}\\" as=\\"f\\" '
+        'hint-placeholder-count=\\"14\\">'
+        '<sc-raw-tr data-tip=\\"{{ f.tip }}\\" '
+        'style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:6px 9px;font:600 10.5px var(--mono);'
+        'color:var(--ink)\\">{{ f.serie }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.aniosF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ f.realF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.mF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--ink)\\">{{ f.beF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:{{ f.v30C }}\\">{{ f.v30F }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:{{ f.v35C }}\\">{{ f.v35F }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:{{ f.v40C }}\\">{{ f.v40F }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
         # fijo vs flotante | carry
         '      <div style=\\"display:grid;grid-template-columns:1fr 1.5fr;'
         'gap:14px\\">\\n'
@@ -2309,7 +2482,30 @@ def _seccion_deuda(html: str, deu: dict) -> str:
     return html
 
 
+def _verificar_bundle(html: str) -> None:
+    """
+    Los bloques __bundler/* del tablero son JSON: una inyeccion con escapes
+    mal balanceados los rompe y el sintoma en el navegador es una pagina en
+    blanco sin error. Mejor tronar aqui, con posicion y contexto.
+    """
+    import json
+    for m in re.finditer(r'<script type="(__bundler/[a-z_]+)">', html):
+        fin = html.find("</script>", m.end())
+        contenido = html[m.end():fin].strip()
+        if not contenido.startswith(("{", "[", '"')):
+            continue
+        try:
+            json.loads(contenido)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"Inyeccion invalida: el bloque {m.group(1)} dejo de ser "
+                f"JSON en la posicion {e.pos}: "
+                f"...{contenido[max(0, e.pos - 60):e.pos + 30]!r}...") from e
+
+
 def html_con_datos_reales(ruta_html: Path | None = None) -> str:
     ruta = ruta_html or (RAIZ / "assets" / "dashboard_baz.html")
     html = ruta.read_text(encoding="utf-8")
-    return inyectar(html, calcular())
+    resultado = inyectar(html, calcular())
+    _verificar_bundle(resultado)
+    return resultado

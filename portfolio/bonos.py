@@ -505,3 +505,39 @@ def percentiles_hoy(hist: pd.DataFrame, a: dict) -> list[dict]:
             maximo=float(serie.max()) if len(serie) else None,
             n=int(len(serie))))
     return out
+
+
+# --------------------------------------------------------------------------
+# Udibonos en escala nominal: la curva real transformada por escenario de
+# inflacion, comparable uno a uno contra la curva de Bonos M
+# --------------------------------------------------------------------------
+
+def udibonos_nominalizados(d: dict,
+                           escenarios=(3.0, 3.5, 4.0)) -> pd.DataFrame:
+    """
+    Cada udibono llevado a tasa nominal equivalente bajo escenarios de
+    inflacion promedio, con Fisher exacto:
+
+        y_nominal_eq = (1 + y_real)·(1 + pi) − 1
+
+    y comparado contra el Bono M interpolado al mismo plazo. La columna
+    be_nodo es la inflacion de indiferencia del nodo ((1+y_M)/(1+y_real)−1):
+    si tu escenario de inflacion promedio supera ese numero, el udibono gana
+    al nominal en ese plazo; si no, pierde. La ventaja por escenario es la
+    diferencia en pb contra el M del mismo plazo.
+    """
+    an_, yt_ = curva_nominal(d)
+    s = d["udibonos"]
+    filas = []
+    for serie, anios, y_real in zip(s["SERIE"], s["anios"], s["ytm"]):
+        y_m = _interp(an_, yt_, float(anios))
+        fila = dict(
+            serie=str(serie), anios=float(anios), real=float(y_real),
+            m_interp=y_m,
+            be_nodo=((1 + y_m / 100) / (1 + y_real / 100) - 1) * 100)
+        for pi in escenarios:
+            nom = ((1 + y_real / 100) * (1 + pi / 100) - 1) * 100
+            fila[f"nom_{pi:.1f}"] = nom
+            fila[f"vent_{pi:.1f}"] = (nom - y_m) * 100.0   # pb vs M
+        filas.append(fila)
+    return pd.DataFrame(filas)
