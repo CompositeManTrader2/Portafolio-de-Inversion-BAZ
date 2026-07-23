@@ -1640,13 +1640,18 @@ def _deuda() -> dict | None:
         notaCurva=("Nominal (CETES + Bonos M) y real (Udibonos) del vector "
                    "Valmer del día; escala de plazo en raíz para abrir el "
                    "tramo corto. Pasa el cursor por cada nodo."),
-        notaMetodo=("Tasas calculadas del precio del vector con las "
-                    "convenciones del mercado: descuento 360 para CETES y "
-                    "cupón semestral 182/360 resuelto por bisección para M "
-                    "y Udibonos (tasa real vía UDI implícita en el interés "
-                    "acumulado). Carry a 3m fondeado al CETE de 91d; "
-                    "rolldown con curva sin cambios. Análisis de mesa; no "
-                    "constituye una recomendación de inversión."),
+        notaMetodo=("Tasas oficiales del vector (columna TASA DE "
+                    "RENDIMIENTO). Verificación de integridad en cada "
+                    "carga: un solver propio revalúa cada instrumento desde "
+                    "el precio (descuento 360 en CETES; cupón semestral "
+                    "182/360 por bisección en M y Udibonos, la tasa real "
+                    "vía UDI implícita) y hoy reproduce las oficiales con "
+                    f"desviación máxima de "
+                    f"{dv['validacion']['max_pb']:.2f} pb. Duración "
+                    "modificada del vector (base 360). Carry a 3m fondeado "
+                    "al CETE de 91d; rolldown con curva sin cambios. "
+                    "Análisis de mesa; no constituye una recomendación de "
+                    "inversión."),
     )
 
 

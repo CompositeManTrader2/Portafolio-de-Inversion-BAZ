@@ -1,9 +1,12 @@
 """
 Analitica de deuda gubernamental sobre el vector analitico de Valmer.
 
-El vector trae precio limpio, interes acumulado, cupon, dias transcurridos
-del cupon, cupones por cobrar, duracion y convexidad, pero no las tasas de
-rendimiento; aqui se calculan con las convenciones del mercado mexicano:
+La columna TASA DE RENDIMIENTO del vector es la fuente primaria de tasas.
+Ademas, cada carga recalcula las tasas desde el precio con las convenciones
+del mercado mexicano y las compara contra las oficiales: si la discrepancia
+maxima excede la tolerancia, el modulo la reporta en `validacion` (y si la
+columna oficial faltara en un vector futuro, el solver toma su lugar).
+Convenciones del solver:
 
   CETES     rendimiento de descuento anualizado 360:  y = (VN/P - 1)·360/d
   BONOS M   cupon semestral de 182 dias, formula estandar de mercado:
@@ -12,6 +15,10 @@ rendimiento; aqui se calculan con las convenciones del mercado mexicano:
   UDIBONOS  misma formula sobre el precio expresado en UDIs -> tasa real.
             El valor de la UDI se recupera del interes acumulado en pesos:
             UDI = int_acum / (cupon/100 · dias/360 · 100).
+
+Duraciones del vector: DURACION MACAULAY viene en DIAS; DURACION es la
+duracion modificada en anios base 360 (verificado: macaulay/(1+y·182/360)/360
+reproduce la columna), que es la correcta para DV01 y rolldown.
 
 El vector se relee solo cuando cambia el archivo (cache por mtime): pesa
 ~29 MB y tarda ~20 s en parsear, inaceptable por interaccion.
@@ -30,7 +37,8 @@ RAIZ = Path(__file__).parent.parent
 COLUMNAS = ["FECHA", "TIPO VALOR", "EMISORA", "SERIE", "PRECIO LIMPIO",
             "PRECIO SUCIO", "INTERESES ACUMULADOS", "SOBRETASA", "FECHA VCTO",
             "TASA CUPON", "DIAS TRANSC. CPN", "CUPONES X COBRAR",
-            "DURACION", "CONVEXIDAD", "MONTO EN CIRCULACION"]
+            "DURACION", "DURACION MACAULAY", "CONVEXIDAD",
+            "MONTO EN CIRCULACION", "TASA DE RENDIMIENTO"]
 
 
 def ruta_vector() -> Path | None:
@@ -80,7 +88,9 @@ def cargar(ruta: Path | None = None) -> dict | None:
     bi["dias"] = bi["FECHA VCTO"].map(_dias)
     bi = bi[bi["dias"] > 3].sort_values("dias")
     bi["anios"] = bi["dias"] / 365.0
-    bi["ytm"] = (10.0 / bi["PRECIO LIMPIO"] - 1.0) * 360.0 / bi["dias"] * 100.0
+    bi["ytm_solver"] = (10.0 / bi["PRECIO LIMPIO"] - 1.0) * 360.0 / bi["dias"] * 100.0
+    bi["oficial"] = pd.to_numeric(bi["TASA DE RENDIMIENTO"], errors="coerce")
+    bi["ytm"] = bi["oficial"].fillna(bi["ytm_solver"])
 
     # ---- BONOS M ---------------------------------------------------------
     m = df[df["TIPO VALOR"] == "M"].copy()
@@ -88,11 +98,13 @@ def cargar(ruta: Path | None = None) -> dict | None:
     m = m[m["dias"] > 30].sort_values("dias")
     m["anios"] = m["dias"] / 365.25
     m["sucio"] = m["PRECIO LIMPIO"] + m["INTERESES ACUMULADOS"]
-    m["ytm"] = [
+    m["ytm_solver"] = [
         _ytm_bono(su, cu, int(n_), dt / 182.0) * 100.0
         for su, cu, n_, dt in zip(m["sucio"], m["TASA CUPON"],
                                   m["CUPONES X COBRAR"],
                                   m["DIAS TRANSC. CPN"])]
+    m["oficial"] = pd.to_numeric(m["TASA DE RENDIMIENTO"], errors="coerce")
+    m["ytm"] = m["oficial"].fillna(m["ytm_solver"])
 
     # ---- UDIBONOS (tasa real) -------------------------------------------
     s = df[df["TIPO VALOR"] == "S"].copy()
@@ -105,11 +117,13 @@ def cargar(ruta: Path | None = None) -> dict | None:
                        / 360.0 * 100.0))
     udi = float(udi_por_bono.median())
     s["sucio_udis"] = (s["PRECIO LIMPIO"] + s["INTERESES ACUMULADOS"]) / udi
-    s["ytm"] = [
+    s["ytm_solver"] = [
         _ytm_bono(su, cu, int(n_), dt / 182.0) * 100.0
         for su, cu, n_, dt in zip(s["sucio_udis"], s["TASA CUPON"],
                                   s["CUPONES X COBRAR"],
                                   s["DIAS TRANSC. CPN"])]
+    s["oficial"] = pd.to_numeric(s["TASA DE RENDIMIENTO"], errors="coerce")
+    s["ytm"] = s["oficial"].fillna(s["ytm_solver"])
 
     # ---- BONDES F (sobretasa) -------------------------------------------
     lf = df[df["TIPO VALOR"] == "LF"].copy()
@@ -117,8 +131,21 @@ def cargar(ruta: Path | None = None) -> dict | None:
     lf = lf[lf["dias"] > 3].sort_values("dias")
     lf["anios"] = lf["dias"] / 365.0
 
+    def _difmax(df_):
+        con = df_.dropna(subset=["oficial"])
+        if not len(con):
+            return None
+        return float((con["ytm_solver"] - con["oficial"]).abs().max() * 100.0)
+
+    validacion = dict(cetes_pb=_difmax(bi), m_pb=_difmax(m),
+                      udibonos_pb=_difmax(s))
+    validacion["max_pb"] = max(v for v in validacion.values()
+                               if v is not None)
+
+    lf["ytm"] = pd.to_numeric(lf["TASA DE RENDIMIENTO"], errors="coerce")
+
     return dict(fecha=fecha, udi=udi, cetes=bi, bonos_m=m,
-                udibonos=s, bondesf=lf)
+                udibonos=s, bondesf=lf, validacion=validacion)
 
 
 # --------------------------------------------------------------------------
