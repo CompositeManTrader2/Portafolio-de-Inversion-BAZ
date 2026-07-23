@@ -4,3 +4,4 @@ numpy>=1.26
 plotly>=5.22
 yfinance>=0.2.40
 openpyxl>=3.1
+xlrd>=2.0

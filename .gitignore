@@ -18,3 +18,6 @@ Thumbs.db
 
 # Vector Valmer subido desde la app (dato de sesion)
 data/VectorSubido.*
+
+# Vector Valmer completo: solo el destilado vector_gob.csv viaja en el repo
+data/VectorAnalitico*

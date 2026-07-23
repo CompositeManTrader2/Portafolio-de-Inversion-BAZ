@@ -41,9 +41,13 @@ COLUMNAS = ["FECHA", "TIPO VALOR", "EMISORA", "SERIE", "PRECIO LIMPIO",
             "MONTO EN CIRCULACION", "TASA DE RENDIMIENTO"]
 
 
+GUBERNAMENTALES = ("BI", "M", "S", "LF", "LD")
+CSV_GOB = RAIZ / "data" / "vector_gob.csv"
+
+
 def ruta_vector() -> Path | None:
-    """El vector vigente es el mas reciente por fecha de archivo, de modo
-    que uno subido desde la app releva al que viaja en el repositorio."""
+    """El vector .xls vigente es el mas reciente por fecha de archivo, de
+    modo que uno subido desde la app releva al que viaja en disco."""
     candidatos = list(RAIZ.glob("data/Vector*.xls*"))
     if not candidatos:
         return None
@@ -51,11 +55,44 @@ def ruta_vector() -> Path | None:
 
 
 @lru_cache(maxsize=2)
-def _leer(ruta: str, mtime: float) -> pd.DataFrame:
+def _leer_xls(ruta: str, mtime: float) -> pd.DataFrame:
     motor = "xlrd" if ruta.lower().endswith(".xls") else "openpyxl"
     df = pd.read_excel(ruta, engine=motor, usecols=COLUMNAS)
     df["TIPO VALOR"] = df["TIPO VALOR"].astype(str).str.strip()
+    return df[df["TIPO VALOR"].isin(GUBERNAMENTALES)].reset_index(drop=True)
+
+
+@lru_cache(maxsize=2)
+def _leer_csv(ruta: str, mtime: float) -> pd.DataFrame:
+    df = pd.read_csv(ruta)
+    df["TIPO VALOR"] = df["TIPO VALOR"].astype(str).str.strip()
     return df
+
+
+def _obtener_gubernamentales(ruta_xls: Path | None = None) -> pd.DataFrame | None:
+    """
+    Los ~140 renglones gubernamentales del vector, por la via mas barata.
+
+    El .xls completo pesa ~29 MB y parsearlo tarda decenas de segundos y
+    cientos de MB de memoria: inviable en cada arranque (y letal en Cloud).
+    Por eso, la primera vez que aparece un .xls mas nuevo que el destilado
+    se parsea UNA vez y se persiste data/vector_gob.csv (~30 KB); todas las
+    cargas posteriores leen el CSV. El CSV viaja en el repositorio, asi que
+    el despliegue nunca necesita el archivo gigante ni el motor xlrd.
+    """
+    xls = ruta_xls or ruta_vector()
+    csv_mtime = CSV_GOB.stat().st_mtime if CSV_GOB.exists() else -1.0
+
+    if xls is not None and xls.exists() and xls.stat().st_mtime > csv_mtime:
+        gob = _leer_xls(str(xls), xls.stat().st_mtime)
+        try:
+            gob.to_csv(CSV_GOB, index=False)
+        except OSError:
+            pass
+        return gob
+    if CSV_GOB.exists():
+        return _leer_csv(str(CSV_GOB), CSV_GOB.stat().st_mtime)
+    return None
 
 
 def _ytm_bono(sucio: float, cupon: float, n: int, f: float,
@@ -78,10 +115,9 @@ def _ytm_bono(sucio: float, cupon: float, n: int, f: float,
 
 
 def cargar(ruta: Path | None = None) -> dict | None:
-    ruta = ruta or ruta_vector()
-    if ruta is None or not ruta.exists():
+    df = _obtener_gubernamentales(ruta)
+    if df is None or not len(df):
         return None
-    df = _leer(str(ruta), ruta.stat().st_mtime)
 
     fecha = datetime.strptime(str(int(df["FECHA"].iloc[0])), "%Y%m%d").date()
 
