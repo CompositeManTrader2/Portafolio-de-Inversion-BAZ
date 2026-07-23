@@ -43,6 +43,15 @@ COLUMNAS = ["FECHA", "TIPO VALOR", "EMISORA", "SERIE", "PRECIO LIMPIO",
 
 GUBERNAMENTALES = ("BI", "M", "S", "LF", "LD")
 CSV_GOB = RAIZ / "data" / "vector_gob.csv"
+CSV_CRED = RAIZ / "data" / "vector_credito.csv"
+DIR_HIST = RAIZ / "data" / "hist_gob"
+
+# corporativos de tasa revisable para las curvas de credito
+TIPOS_CREDITO = ("91", "93", "94", "95", "D1", "D2", "OD")
+COLS_CREDITO = ["FECHA", "TIPO VALOR", "EMISORA", "SERIE", "SOBRETASA",
+                "FECHA VCTO", "S&P", "MDYS", "CALIFICACION FITCH",
+                "HR RATINGS", "SECTOR", "MONTO EN CIRCULACION",
+                "BURSATILIDAD"]
 
 
 def ruta_vector() -> Path | None:
@@ -87,6 +96,13 @@ def _obtener_gubernamentales(ruta_xls: Path | None = None) -> pd.DataFrame | Non
         gob = _leer_xls(str(xls), xls.stat().st_mtime)
         try:
             gob.to_csv(CSV_GOB, index=False)
+            # foto diaria para el historico de curvas (una por fecha de vector)
+            fecha = str(int(gob["FECHA"].iloc[0]))
+            DIR_HIST.mkdir(exist_ok=True)
+            destino_hist = DIR_HIST / f"gob_{fecha}.csv"
+            if not destino_hist.exists():
+                gob.to_csv(destino_hist, index=False)
+            _destilar_credito(xls)
         except OSError:
             pass
         return gob
@@ -118,7 +134,10 @@ def cargar(ruta: Path | None = None) -> dict | None:
     df = _obtener_gubernamentales(ruta)
     if df is None or not len(df):
         return None
+    return _procesar(df)
 
+
+def _procesar(df: pd.DataFrame) -> dict:
     fecha = datetime.strptime(str(int(df["FECHA"].iloc[0])), "%Y%m%d").date()
 
     def _dias(vcto) -> int:
@@ -329,3 +348,160 @@ def matriz_escenarios(d: dict, choques_pb=(-100, -50, 0, 50, 100),
             fila[f"tr_{c:+d}"] = base + precio
         filas.append(fila)
     return pd.DataFrame(filas)
+
+
+# --------------------------------------------------------------------------
+# Tasa revisable: sobretasas de BONDES F y fijo contra flotante
+# --------------------------------------------------------------------------
+
+def sobretasas_bondesf(d: dict) -> pd.DataFrame:
+    """Curva de sobretasas de BONDES F (pb) por plazo."""
+    lf = d["bondesf"].copy()
+    lf["st_pb"] = pd.to_numeric(lf["SOBRETASA"], errors="coerce") * 100.0
+    lf = lf.dropna(subset=["st_pb"]).sort_values("anios")
+    return lf[["SERIE", "anios", "st_pb", "ytm"]]
+
+
+def _st_interp(lf: pd.DataFrame, t: float) -> float:
+    return float(np.interp(t, lf["anios"].values, lf["st_pb"].values))
+
+
+def fijo_vs_flotante(d: dict) -> pd.DataFrame:
+    """
+    Breakeven de fondeo por plazo: el BONDES F paga fondeo + sobretasa y el
+    Bono M paga fijo, asi que el flotante gana si el fondeo PROMEDIO del
+    periodo supera (fija - sobretasa). La ultima columna traduce eso a pb de
+    alza promedio requerida desde el fondeo de hoy.
+    """
+    lf = sobretasas_bondesf(d)
+    an_, yt_ = curva_nominal(d)
+    fondeo = float(nodo_cercano(d["cetes"], 91 / 365.0)["ytm"])
+    filas = []
+    for t in (1.0, 1.61, 2.61, 3.61, 4.85):
+        y_fijo = _interp(an_, yt_, t)
+        st = _st_interp(lf, min(t, float(lf["anios"].max())))
+        breakeven = y_fijo - st / 100.0
+        filas.append(dict(
+            anios=t, fijo=y_fijo, sobretasa_pb=st,
+            breakeven_fondeo=breakeven,
+            alza_requerida_pb=(breakeven - fondeo) * 100.0))
+    return pd.DataFrame(filas)
+
+
+# --------------------------------------------------------------------------
+# Credito corporativo (tasa revisable): sobretasas por calificacion
+# --------------------------------------------------------------------------
+
+def _destilar_credito(xls: Path) -> None:
+    """Subset corporativo del vector -> data/vector_credito.csv (~200 KB)."""
+    motor = "xlrd" if str(xls).lower().endswith(".xls") else "openpyxl"
+    df = pd.read_excel(xls, engine=motor, usecols=COLS_CREDITO)
+    df["TIPO VALOR"] = df["TIPO VALOR"].astype(str).str.strip()
+    df["st"] = pd.to_numeric(df["SOBRETASA"], errors="coerce")
+    df = df[df["TIPO VALOR"].isin(TIPOS_CREDITO) & (df["st"] > 0.001)]
+    df.drop(columns=["st"]).to_csv(CSV_CRED, index=False)
+
+
+def _bucket_rating(fila) -> str:
+    for c in ("S&P", "MDYS", "CALIFICACION FITCH", "HR RATINGS"):
+        v = str(fila.get(c, "")).strip().upper()
+        if v and v not in ("-", "NAN", "N.D.", "ND", ""):
+            v = v.replace("MX", "").replace("HR", "").replace(" ", "")
+            if v.startswith("AAA"):
+                return "AAA"
+            if v.startswith("AA"):
+                return "AA"
+            if v.startswith("A"):
+                return "A"
+            if v.startswith("BBB"):
+                return "BBB"
+            return "Sub-BBB/otro"
+    return "Sin calificacion"
+
+
+def credito_buckets() -> dict | None:
+    """
+    Sobretasa mediana (pb) por escalon de calificacion x plazo con conteos.
+    Mediana y no promedio: el universo mezcla quirografarios, bancarios y
+    estructurados y las colas contaminan el promedio (curaduria por sector
+    pendiente; la nota lo declara).
+    """
+    if not CSV_CRED.exists():
+        return None
+    df = pd.read_csv(CSV_CRED)
+    fecha = datetime.strptime(str(int(df["FECHA"].iloc[0])), "%Y%m%d").date()
+    df["st_pb"] = pd.to_numeric(df["SOBRETASA"], errors="coerce") * 100.0
+    df["anios"] = (pd.to_datetime(df["FECHA VCTO"])
+                   - pd.Timestamp(fecha)).dt.days / 365.0
+    df = df.dropna(subset=["st_pb"])
+    df = df[(df["anios"] > 0.05) & (df["st_pb"] < 1000)]
+    df["rating"] = df.apply(_bucket_rating, axis=1)
+    df["plazo"] = pd.cut(df["anios"], [0, 1, 3, 5, 30],
+                         labels=["0-1a", "1-3a", "3-5a", "5a+"])
+
+    orden = ["AAA", "AA", "A", "BBB"]
+    tabla = []
+    for r in orden:
+        sub = df[df["rating"] == r]
+        fila = dict(rating=r, n=int(len(sub)))
+        for pz in ["0-1a", "1-3a", "3-5a", "5a+"]:
+            g = sub[sub["plazo"] == pz]["st_pb"]
+            fila[pz] = (float(g.median()), int(len(g))) if len(g) >= 3 else None
+        tabla.append(fila)
+
+    med = {}
+    for r in orden:
+        serie = df[df["rating"] == r]["st_pb"]
+        if len(serie) >= 3:
+            med[r] = float(serie.median())
+    pickups = []
+    for a, b in zip(orden, orden[1:]):
+        if a in med and b in med:
+            pickups.append((a + " a " + b, med[b] - med[a]))
+    return dict(fecha=fecha, tabla=tabla, pickups=pickups,
+                total=int(len(df)),
+                sin_calif=int((df["rating"] == "Sin calificacion").sum()))
+
+
+# --------------------------------------------------------------------------
+# Historico de vectores: metricas por sesion y percentiles
+# --------------------------------------------------------------------------
+
+def historico_metricas() -> pd.DataFrame:
+    """Una fila de metricas de curva por cada snapshot en data/hist_gob."""
+    if not DIR_HIST.exists():
+        return pd.DataFrame()
+    filas = []
+    for f in sorted(DIR_HIST.glob("gob_*.csv")):
+        try:
+            d = _procesar(pd.read_csv(f))
+            a = analitica(d)
+            filas.append(dict(
+                fecha=d["fecha"], cete364=a["cete364"], m2=a["m2"],
+                m5=a["m5"], m10=a["m10"], p2s10=a["p2s10"],
+                p10s30=a["p10s30"], fly=a["fly_2_5_10"],
+                ext_corta=a["ext_corta"], be10=a["be10"]))
+        except Exception:
+            continue
+    return pd.DataFrame(filas)
+
+
+def percentiles_hoy(hist: pd.DataFrame, a: dict) -> list[dict]:
+    """Donde cae cada metrica de hoy dentro de su propia historia."""
+    mapa = [("2s10s", "p2s10", a["p2s10"], "pb"),
+            ("Fly 2s5s10s", "fly", a["fly_2_5_10"], "pb"),
+            ("Extension M2-CETE1a", "ext_corta", a["ext_corta"], "pb"),
+            ("BE 10a", "be10", a["be10"], "%"),
+            ("M10", "m10", a["m10"], "%"),
+            ("CETE 1a", "cete364", a["cete364"], "%")]
+    out = []
+    for etiqueta, col, hoy, unidad in mapa:
+        serie = hist[col].dropna() if col in hist else pd.Series(dtype=float)
+        pct = (float((serie <= hoy).mean() * 100.0)
+               if len(serie) >= 5 else None)
+        out.append(dict(
+            etiqueta=etiqueta, hoy=float(hoy), unidad=unidad, pct=pct,
+            minimo=float(serie.min()) if len(serie) else None,
+            maximo=float(serie.max()) if len(serie) else None,
+            n=int(len(serie))))
+    return out

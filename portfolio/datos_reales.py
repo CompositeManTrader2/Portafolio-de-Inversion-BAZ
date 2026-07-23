@@ -1472,16 +1472,20 @@ def _seccion_rotacion(html: str, rot: dict) -> str:
 
 
 # --------------------------------------------------------------------------
-# Deuda gubernamental: curvas del vector Valmer y estrategias de mesa
+# Renta fija: tres pestanas sobre el vector Valmer
 # --------------------------------------------------------------------------
-# La pestana lee el destilado del vector (data/vector_gob.csv), calcula las
-# curvas con las tasas oficiales y despliega el analisis autorado por sesion
-# (data/analisis_deuda.json) junto con cuatro herramientas de decision: la
-# curva anotada (nodos etiquetados, coloreados por rich/cheap, fondeo de
-# referencia y crosshair con nominal/real/breakeven interpolados), el valor
-# relativo por bono, la matriz de retorno total a 12 meses bajo choques
-# paralelos contra la alternativa de quedarse en CETE de 1 anio, y la tabla
-# de carry+rolldown.
+# La seccion de deuda se separa en tres vistas para que datos, analisis y
+# valuacion no se mezclen:
+#   Mercado    -> lo que DICE el vector: KPIs, curva anotada, sobretasas de
+#                 BONDES F, niveles por bono e historico con percentiles.
+#   Analisis   -> lo que la mesa OPINA y las herramientas de decision: tesis
+#                 autorada, valor relativo, matriz de escenarios, carry y
+#                 fijo contra flotante.
+#   Valuacion  -> como se CALCULA y el credito: verificacion solver vs tasa
+#                 oficial, convenciones, UDI y curvas de sobretasa
+#                 corporativa por calificacion.
+# La navegacion se agrupa (Renta variable / Renta fija / General) sin tocar
+# el marcado: los encabezados son botones inertes con estilo propio.
 
 from . import bonos as bn
 
@@ -1499,7 +1503,8 @@ def _deuda() -> dict | None:
     cete1a = a["cete364"]
     res_por_serie = dict(zip(res["serie"], res["residuo_pb"]))
 
-    # ---- curva anotada (viewBox 980 x 380, escala raiz) ------------------
+    # ================= MERCADO =================
+    # ---- curva anotada (identica a la version previa) --------------------
     W_, H_, mL, mR, mT, mB = 980.0, 380.0, 50.0, 18.0, 30.0, 34.0
     t_max = float(dv["bonos_m"]["anios"].max()) * 1.03
     y_lo = float(np.floor(dv["udibonos"]["ytm"].min() * 2) / 2 - 0.5)
@@ -1515,7 +1520,6 @@ def _deuda() -> dict | None:
         return " ".join(f"{X(t):.1f},{Y(y):.1f}"
                         for t, y in zip(df_["anios"], df_["ytm"]))
 
-    # rejilla: mayor cada 1 %, menor cada 0.5 %
     g_may, g_men = [], []
     v = y_lo
     while v <= y_hi + 1e-9:
@@ -1528,7 +1532,6 @@ def _deuda() -> dict | None:
                               (7, "7a"), (10, "10a"), (15, "15a"),
                               (20, "20a"), (28.5, "30a")] if t <= t_max]
 
-    # nodos: M etiquetados y coloreados por rich/cheap
     puntos, etiquetas_m = [], []
     for i, r_ in enumerate(dv["bonos_m"].itertuples()):
         serie = str(r_.SERIE)
@@ -1541,9 +1544,7 @@ def _deuda() -> dict | None:
             cx=f"{cx:.1f}", cy=f"{cy:.1f}", r="4.2", color=color,
             tip=(f"BONO M {serie}|Tasa {r_.ytm:.2f} % · "
                  f"{r_.anios:.1f}a · dur {r_.DURACION:.2f}"
-                 f"|Valor relativo: {rpb:+.0f} pb ({estado})"
-                 f"|Carry+roll 3m: "
-                 f"{float(cr.loc[cr['serie'] == serie, 'total_bp'].iloc[0]):+.0f} pb")))
+                 f"|Valor relativo: {rpb:+.0f} pb ({estado})")))
         etiquetas_m.append(dict(
             x=f"{cx:.1f}",
             y=f"{cy - 11:.1f}" if i % 2 == 0 else f"{cy + 19:.1f}",
@@ -1552,14 +1553,13 @@ def _deuda() -> dict | None:
         puntos.append(dict(
             cx=f"{X(r_.anios):.1f}", cy=f"{Y(r_.ytm):.1f}", r="2.6",
             color="var(--warn)",
-            tip=(f"CETE {r_.SERIE}|{int(r_.dias)} días · "
-                 f"{r_.ytm:.2f} %")))
+            tip=f"CETE {r_.SERIE}|{int(r_.dias)} días · {r_.ytm:.2f} %"))
     for r_ in dv["udibonos"].itertuples():
         puntos.append(dict(
             cx=f"{X(r_.anios):.1f}", cy=f"{Y(r_.ytm):.1f}", r="3.4",
             color="var(--pos)",
             tip=(f"UDIBONO {r_.SERIE}|Tasa real {r_.ytm:.2f} % · "
-                 f"{r_.anios:.1f}a|Cupón {r_.TASA_CUPON if hasattr(r_, 'TASA_CUPON') else ''}")))
+                 f"{r_.anios:.1f}a")))
 
     curva = dict(
         lineaM=linea(dv["bonos_m"]), lineaC=linea(dv["cetes"]),
@@ -1567,7 +1567,6 @@ def _deuda() -> dict | None:
         etiquetasM=etiquetas_m, gMay=g_may, gMen=g_men, ticksX=ticks_x,
         fondeoY=f"{Y(fondeo):.1f}", fondeoF=f"Fondeo {fondeo:.2f} %")
 
-    # crosshair: muestreo uniforme en pixeles (t = frac² · t_max)
     an_, yt_ = bn.curva_nominal(dv)
     an_s = dv["udibonos"]["anios"].values
     yt_s = dv["udibonos"]["ytm"].values
@@ -1586,7 +1585,57 @@ def _deuda() -> dict | None:
     serie_curva = dict(W=980, padL=int(mL), padR=int(mR), n=n_cx,
                        tips=tips_curva)
 
-    # ---- valor relativo por bono (barras divergentes) --------------------
+    # ---- sobretasas de BONDES F por plazo --------------------------------
+    lf = bn.sobretasas_bondesf(dv)
+    st_buckets = []
+    st_max = float(lf["st_pb"].max()) or 1.0
+    for lo, hi, eti in [(0, 0.5, "0–6m"), (0.5, 1, "6m–1a"), (1, 2, "1–2a"),
+                        (2, 3, "2–3a"), (3, 5, "3–5a"), (5, 9, "5a+")]:
+        g = lf[(lf["anios"] >= lo) & (lf["anios"] < hi)]
+        if not len(g):
+            continue
+        prom = float(g["st_pb"].mean())
+        st_buckets.append(dict(
+            eti=eti, stF=f"{prom:.1f} pb",
+            w=f"{prom / st_max * 100:.0f}",
+            tip=(f"BONDES F {eti}|Sobretasa promedio {prom:.1f} pb "
+                 f"({len(g)} emisiones)"
+                 f"|Rango {g['st_pb'].min():.0f}–{g['st_pb'].max():.0f} pb")))
+
+    # ---- niveles por bono (datos puros del vector) -----------------------
+    m_b = dv["bonos_m"]
+    niveles = [dict(serie=str(se), venc=f"{pd.Timestamp(vc).date()}",
+                    aniosF=f"{an:.2f}", ytmF=f"{yt:.2f} %",
+                    durF=f"{du:.2f}", convF=f"{co:.1f}")
+               for se, vc, an, yt, du, co in zip(
+                   m_b["SERIE"], m_b["FECHA VCTO"], m_b["anios"],
+                   m_b["ytm"], m_b["DURACION"], m_b["CONVEXIDAD"])]
+
+    # ---- historico y percentiles -----------------------------------------
+    hist = bn.historico_metricas()
+    pcts = bn.percentiles_hoy(hist, a)
+    n_hist = int(len(hist))
+    hist_rows = []
+    for x in pcts:
+        if x["pct"] is not None:
+            pct_f = f"p{x['pct']:.0f}"
+            rango = f"{x['minimo']:.1f} – {x['maximo']:.1f}"
+        else:
+            pct_f = "—"
+            rango = "—"
+        hist_rows.append(dict(
+            eti=x["etiqueta"],
+            hoyF=(f"{x['hoy']:+.0f} {x['unidad']}" if x["unidad"] == "pb"
+                  else f"{x['hoy']:.2f} {x['unidad']}"),
+            pctF=pct_f, rangoF=rango))
+    hist_nota = (
+        f"{n_hist} sesión(es) acumulada(s) en data/hist_gob. Cada vector "
+        f"nuevo agrega una foto; los percentiles se activan con 5 y ganan "
+        f"sentido con 20+. Con historia suficiente, cada señal pasa de "
+        f"“la curva está empinada” a “empinamiento en el "
+        f"percentil X del año”.")
+
+    # ================= ANALISIS =================
     r_max = float(res["residuo_pb"].abs().max()) or 1.0
     rich_cheap = [dict(
         name=r_.serie, valF=f"{r_.residuo_pb:+.0f} pb",
@@ -1594,17 +1643,15 @@ def _deuda() -> dict | None:
         wneg=f"{abs(r_.residuo_pb) / r_max * 100:.0f}" if r_.residuo_pb < 0 else 0,
         color="var(--pos)" if r_.residuo_pb > 0 else "var(--neg)",
         tip=(f"BONO M {r_.serie}|Residuo {r_.residuo_pb:+.1f} pb vs curva "
-             f"ajustada|{'Rinde de más: candidato de compra' if r_.residuo_pb > 4 else 'Rinde de menos: candidato de venta/switch' if r_.residuo_pb < -4 else 'En línea con la curva'}"))
+             f"ajustada"))
         for r_ in res.itertuples()]
 
-    # ---- matriz de escenarios a 12 meses ---------------------------------
     choques = [-100, -50, 0, 50, 100]
     esc_filas = []
     for r_ in mx.itertuples():
         celdas = []
         for c in choques:
-            tr = getattr(r_, f"tr_{c:+d}".replace("+-", "_m").replace("+", "_p")) \
-                if False else mx.loc[mx["serie"] == r_.serie, f"tr_{c:+d}"].iloc[0]
+            tr = mx.loc[mx["serie"] == r_.serie, f"tr_{c:+d}"].iloc[0]
             dif = tr - cete1a
             intensidad = min(42, abs(dif) * 3.5)
             bg = (f"color-mix(in srgb, var(--pos) {intensidad:.0f}%, transparent)"
@@ -1622,18 +1669,15 @@ def _deuda() -> dict | None:
         cols=[f"{c:+d} pb" if c else "Sin cambio" for c in choques],
         refF=f"{cete1a:.2f} %")
 
-    # ---- tabla de nodos M con carry + rolldown y residuo -----------------
     mejor_total = cr.loc[cr["total_bp"].idxmax()]
     m_df = dv["bonos_m"].reset_index(drop=True)
-    filas = []
+    filas_carry = []
     for i, r_ in enumerate(cr.itertuples()):
         b = m_df.iloc[i]
         rpb = res_por_serie.get(r_.serie, 0.0)
-        filas.append(dict(
-            serie=r_.serie, venc=f"{pd.Timestamp(b['FECHA VCTO']).date()}",
-            aniosF=f"{r_.anios:.2f}", cupF=f"{b['TASA CUPON']:.2f}",
-            pF=f"{b['PRECIO LIMPIO']:.3f}", ytmF=f"{r_.ytm:.2f} %",
-            durF=f"{b['DURACION']:.2f}",
+        filas_carry.append(dict(
+            serie=r_.serie, aniosF=f"{r_.anios:.2f}",
+            ytmF=f"{r_.ytm:.2f} %", durF=f"{b['DURACION']:.2f}",
             resF=f"{rpb:+.0f}",
             resC=("var(--pos)" if rpb > 4 else
                   "var(--neg)" if rpb < -4 else "var(--ink3)"),
@@ -1641,24 +1685,35 @@ def _deuda() -> dict | None:
             totF=f"{r_.total_bp:+.0f}",
             totC=("var(--pos)" if r_.total_bp > 0 else "var(--neg)"),
             marca=("★ " if r_.serie == str(mejor_total["serie"]) else ""),
-            tip=(f"BONO M {r_.serie}|YTM {r_.ytm:.2f} % · duración "
-                 f"{b['DURACION']:.2f}|Residuo {rpb:+.0f} pb · "
-                 f"carry+roll 3m {r_.total_bp:+.0f} pb")))
+            tip=(f"BONO M {r_.serie}|Residuo {rpb:+.0f} pb · carry+roll 3m "
+                 f"{r_.total_bp:+.0f} pb")))
 
-    # ---- estrategias: motor de respaldo ----------------------------------
+    # ---- fijo contra flotante --------------------------------------------
+    fvf = bn.fijo_vs_flotante(dv)
+    fvf_rows = [dict(
+        plazoF=f"{r_.anios:.1f}a", fijoF=f"{r_.fijo:.2f} %",
+        stF=f"{r_.sobretasa_pb:.0f} pb",
+        beF=f"{r_.breakeven_fondeo:.2f} %",
+        alzaF=f"{r_.alza_requerida_pb:+.0f} pb",
+        alzaC=("var(--pos)" if r_.alza_requerida_pb > 75 else
+               "var(--warn)" if r_.alza_requerida_pb > 30 else "var(--neg)"),
+        tip=(f"Plazo {r_.anios:.1f}a|Fijo (M) {r_.fijo:.2f} % vs BONDES F "
+             f"fondeo+{r_.sobretasa_pb:.0f} pb|El flotante gana si el "
+             f"fondeo promedia más de {r_.breakeven_fondeo:.2f} % "
+             f"({r_.alza_requerida_pb:+.0f} pb vs hoy)"))
+        for r_ in fvf.itertuples()]
+
+    # ---- estrategias: respaldo + analisis autorado -----------------------
     n2 = a["nodo_m2"]
-    pickup = a["ext_corta"]
     estrategias = [
         dict(icon="▲", color="var(--pos)",
              titulo=f"Extensión corta: CETE 1a → BONO M {n2['SERIE']}",
-             detalle=(f"Pickup de {pickup:+.0f} pb con duración "
-                      f"{n2['DURACION']:.1f}.")),
+             detalle=f"Pickup de {a['ext_corta']:+.0f} pb con duración "
+                     f"{n2['DURACION']:.1f}."),
         dict(icon="★", color="var(--pos)",
              titulo=f"Carry+rolldown: {mejor_total['serie']}",
-             detalle=(f"{mejor_total['total_bp']:+.0f} pb a 3 meses.")),
+             detalle=f"{mejor_total['total_bp']:+.0f} pb a 3 meses."),
     ]
-
-    # ---- analisis autorado de la mesa (Claude Code) ----------------------
     autoria = ""
     ruta_analisis = DATOS / "analisis_deuda.json"
     if ruta_analisis.exists():
@@ -1684,9 +1739,9 @@ def _deuda() -> dict | None:
             estrategias.insert(0, dict(
                 icon="✎", color="var(--warn)",
                 titulo="Análisis de mesa pendiente para este vector",
-                detalle=("Tarjetas del motor automático. Corre la sesión de "
-                         "análisis con Claude Code sobre el vector vigente "
-                         "para el análisis autorado del día.")))
+                detalle=("Tarjetas del motor automático. Corre la sesión "
+                         "de análisis con Claude Code sobre el vector "
+                         "vigente para publicar el análisis del día.")))
 
     rezago = (date.today() - dv["fecha"]).days
     if rezago >= 1:
@@ -1699,6 +1754,54 @@ def _deuda() -> dict | None:
 
     fwd_txt = " · ".join(f"{f['t1']}a→{f['t2']}a {f['fwd']:.2f} %"
                          for f in fwds)
+
+    # ================= VALUACION =================
+    val_rows = [
+        dict(clase="CETES", n=f"{len(dv['cetes'])}",
+             met="Descuento anualizado 360",
+             difF=f"{dv['validacion']['cetes_pb']:.3f} pb"),
+        dict(clase="Bonos M", n=f"{len(dv['bonos_m'])}",
+             met="Cupón semestral 182/360, bisección",
+             difF=f"{dv['validacion']['m_pb']:.3f} pb"),
+        dict(clase="Udibonos", n=f"{len(dv['udibonos'])}",
+             met="182/360 en UDIs (UDI implícita)",
+             difF=f"{dv['validacion']['udibonos_pb']:.3f} pb"),
+        dict(clase="Bondes F", n=f"{len(dv['bondesf'])}",
+             met="Tasa oficial del vector (flotante)", difF="—"),
+    ]
+    convenciones = (
+        "La fuente primaria de tasas es la columna TASA DE RENDIMIENTO del "
+        "vector. En cada carga, un solver propio revalúa cada instrumento "
+        "desde su precio y compara contra la oficial (tabla izquierda): si "
+        "un vector llegara con precios y tasas inconsistentes, la "
+        "desviación lo delata. La UDI se recupera del interés acumulado en "
+        "pesos de cada udibono (mediana entre emisiones). Duración "
+        "modificada del vector (base 360, verificada contra la Macaulay en "
+        "días). Carry fondeado al CETE de 91d y rolldown con curva sin "
+        "cambios. Análisis de mesa; no constituye una recomendación de "
+        "inversión.")
+
+    cb = bn.credito_buckets()
+    cred_rows, cred_pick, cred_nota = [], "", ""
+    if cb is not None:
+        for f in cb["tabla"]:
+            fila = dict(rating=f["rating"], nF=f"{f['n']}")
+            for pz in ["0-1a", "1-3a", "3-5a", "5a+"]:
+                v = f.get(pz)
+                clave = {"0-1a": "p01", "1-3a": "p13",
+                         "3-5a": "p35", "5a+": "p5m"}[pz]
+                fila[clave] = f"{v[0]:.0f} ({v[1]})" if v else "—"
+            cred_rows.append(fila)
+        cred_pick = " · ".join(f"{k}: {v:+.0f} pb" for k, v in cb["pickups"])
+        cred_nota = (
+            f"{cb['total']:,} títulos corporativos de tasa revisable del "
+            f"vector; mediana de sobretasa en pb (n) por calificación y "
+            f"plazo. Se usa mediana porque el universo mezcla papel "
+            f"quirografario, bancario y estructurado — la curaduría por "
+            f"sector está pendiente y explica anomalías como el escalón "
+            f"AA→A. {cb['sin_calif']} títulos sin calificación excluidos "
+            f"del cuadro. Uso: cualquier papel que ofrezca el mercado se "
+            f"compara contra la mediana de su celda.")
 
     return dict(
         fechaF=f"{dv['fecha'].day} {MES_UI[dv['fecha'].month]} {dv['fecha'].year}",
@@ -1713,50 +1816,79 @@ def _deuda() -> dict | None:
             dict(label="BE 10a", value=f"{a['be10']:.2f} %"),
             dict(label="Fondeo (91d)", value=f"{fondeo:.2f} %"),
         ],
-        curva=curva, serieCurva=serie_curva, richCheap=rich_cheap,
-        escenarios=escenarios, filas=filas, estrategias=estrategias,
-        fwdTxt=f"Forwards implícitos: {fwd_txt}",
+        curva=curva, serieCurva=serie_curva,
+        stBuckets=st_buckets, niveles=niveles,
+        histRows=hist_rows, histNota=hist_nota, histN=f"{n_hist}",
+        richCheap=rich_cheap, escenarios=escenarios,
+        filasCarry=filas_carry, fvfRows=fvf_rows,
+        estrategias=estrategias, fwdTxt=f"Forwards: {fwd_txt}",
+        valRows=val_rows, convenciones=convenciones,
+        credRows=cred_rows, credPick=cred_pick, credNota=cred_nota,
         notaCurva=("Nodos M coloreados por valor relativo (verde barato, "
-                   "rojo caro, morado en línea) y etiquetados por serie; "
-                   "CETES en ámbar y Udibonos (tasa real) en verde. La "
-                   "línea punteada es el fondeo. Recorre la curva con el "
-                   "cursor para nominal, real y breakeven interpolados."),
-        notaRichCheap=("Residuo de cada Bono M contra una curva ajustada "
-                       "(polinomio cúbico en raíz del plazo). Positivo "
-                       "rinde de más (barato); negativo, de menos (caro). "
-                       "Es la base de los switches de valor relativo."),
-        notaEscenarios=("Retorno total estimado a 12 meses por bono: carry "
-                        "+ rolldown + efecto precio (−dur·Δy + ½·conv·Δy²) "
-                        "bajo choques paralelos. El color compara contra "
-                        f"quedarse en el CETE de 1a ({cete1a:.2f} %): verde "
-                        "le gana, rojo pierde. La fila donde el verde "
-                        "resiste choques de +100 pb es la extensión "
+                   "rojo caro) y etiquetados por serie; CETES en ámbar, "
+                   "Udibonos (tasa real) en verde, fondeo punteado. Recorre "
+                   "la curva con el cursor para nominal, real y breakeven."),
+        notaSt=("La sobretasa de BONDES F tiene curva propia: extender el "
+                "plazo del flotante multiplica el spread sin tomar duración "
+                "de tasa — la extensión más barata que existe para la "
+                "caja."),
+        notaRichCheap=("Residuo de cada Bono M contra la curva ajustada "
+                       "(cúbica en raíz del plazo). Positivo rinde de más "
+                       "(barato); negativo, de menos (caro)."),
+        notaEscenarios=("Retorno total a 12 meses: carry + rolldown + "
+                        "precio (−dur·Δy + ½·conv·Δy²) bajo choques "
+                        "paralelos. Verde gana al CETE de 1a; la fila donde "
+                        "el verde resiste +100 pb es la extensión "
                         "defendible."),
-        notaMetodo=(autoria + "Tasas oficiales del vector (columna TASA DE "
-                    "RENDIMIENTO), verificadas contra un solver propio "
-                    f"(desviación máxima hoy: "
-                    f"{dv['validacion']['max_pb']:.2f} pb). Duración "
-                    "modificada del vector (base 360). Carry a 3m fondeado "
-                    "al CETE de 91d; rolldown con curva sin cambios. "
-                    "Análisis de mesa; no constituye una recomendación de "
-                    "inversión."),
+        notaFvf=("Fijo contra flotante por plazo: pb de alza PROMEDIO del "
+                 "fondeo que hacen falta para que el BONDES F gane al Bono "
+                 "M. Verde: el fijo tiene colchón amplio; rojo: el "
+                 "flotante casi empata."),
+        notaAutoria=(autoria or "Motor automático de reglas (sin análisis "
+                     "autorado para este vector)."),
     )
 
 
 def _seccion_deuda(html: str, deu: dict) -> str:
-    # ---- navegacion, titulos y bandera -----------------------------------
+    # ---- navegacion agrupada, titulos y banderas -------------------------
+    html = _sub(html,
+        "const NAV = [['resumen','Resumen','01'],",
+        "const NAV = [['#','Renta variable'],['resumen','Resumen','01'],")
     html = _sub(html,
         "['rotacion','Rotación','09'],['configuracion','Configuración','10']",
-        "['rotacion','Rotación','09'],['deuda','Deuda','10'],"
-        "['configuracion','Configuración','11']")
+        "['rotacion','Rotación','09'],"
+        "['#','Renta fija'],"
+        "['deuda-mdo','Mercado · Vector','10'],"
+        "['deuda-ana','Análisis · Estrategias','11'],"
+        "['deuda-val','Valuación · Crédito','12'],"
+        "['#','General'],['configuracion','Configuración','13']")
+    html = _sub(html,
+        "const nav = NAV.map(([id, label, code]) => ({ label, code, "
+        "go: () => this.setState({ tab: id }), "
+        "stl: this.navStl(this.state.tab === id) }));",
+        "const nav = NAV.map(([id, label, code]) => (id === '#' "
+        "? { label, code: '', go: () => {}, stl: 'display:block;width:100%;"
+        "text-align:left;font:700 8.5px/1 var(--sans);letter-spacing:.14em;"
+        "text-transform:uppercase;color:var(--ink3);padding:14px 11px 5px;"
+        "border:none;border-top:1px solid var(--border);margin-top:6px;"
+        "background:transparent;cursor:default;pointer-events:none' } "
+        ": { label, code, go: () => this.setState({ tab: id }), "
+        "stl: this.navStl(this.state.tab === id) }));")
     html = _sub(html,
         "configuracion: ['Configuración', 'Fuentes de datos",
-        "deuda: ['Deuda gubernamental', 'Vector Valmer del " + deu["fechaF"]
-        + " · curvas, valor relativo, escenarios y estrategias'], "
+        "'deuda-mdo': ['Renta fija · Mercado', 'Vector Valmer del "
+        + deu["fechaF"] + " · curvas, sobretasas, niveles e histórico'], "
+        "'deuda-ana': ['Renta fija · Análisis y estrategias', 'Tesis de la "
+        "mesa, valor relativo, escenarios y carry'], "
+        "'deuda-val': ['Renta fija · Valuación y crédito', 'Verificación "
+        "de precios, convenciones y sobretasas corporativas'], "
         "configuracion: ['Configuración', 'Fuentes de datos")
     html = _sub(html,
         "isRotacion: this.state.tab === 'rotacion', rot: ",
-        "isDeuda: this.state.tab === 'deuda', deu: " + js(deu)
+        "isDeudaMdo: this.state.tab === 'deuda-mdo', "
+        "isDeudaAna: this.state.tab === 'deuda-ana', "
+        "isDeudaVal: this.state.tab === 'deuda-val', "
+        "deu: " + js(deu)
         + ", isRotacion: this.state.tab === 'rotacion', rot: ")
 
     TD = '<\\u002Fdiv>'
@@ -1770,6 +1902,7 @@ def _seccion_deuda(html: str, deu: dict) -> str:
     th = ('text-align:right;font:700 9px/1 var(--sans);'
           'letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);'
           'padding:8px 9px')
+    th_izq = th.replace('text-align:right', 'text-align:left')
     td = 'padding:6px 9px;text-align:right;font-family:var(--mono)'
 
     def chip(color, texto):
@@ -1779,27 +1912,45 @@ def _seccion_deuda(html: str, deu: dict) -> str:
                 + ';display:inline-block\\"><\\u002Fspan>' + texto
                 + '<\\u002Fspan>')
 
-    seccion = (
-        '<!-- ================= DEUDA ================= -->\\n'
-        '      <sc-if value=\\"{{ isDeuda }}\\" '
-        'hint-placeholder-val=\\"{{ false }}\\">\\n'
-        # ---- KPIs ----
-        '      <div style=\\"display:grid;'
-        'grid-template-columns:repeat(8,1fr);gap:10px;margin-bottom:14px\\">'
-        '<sc-for list=\\"{{ deu.kpis }}\\" as=\\"k\\" '
-        'hint-placeholder-count=\\"8\\">'
-        '<div style=\\"' + card.replace('padding:14px 16px',
-                                        'padding:10px 12px') + '\\">'
-        '<div style=\\"font:600 8.5px/1 var(--sans);letter-spacing:.1em;'
-        'text-transform:uppercase;color:var(--ink3)\\">{{ k.label }}' + TD +
-        '<div style=\\"font:600 15px/1.3 var(--mono);color:var(--ink);'
-        'margin-top:4px\\">{{ k.value }}' + TD + TD + '<\\u002Fsc-for>' + TD
-        + '\\n'
-        # ---- curva anotada ----
+    def kpis_strip():
+        return ('<div style=\\"display:grid;'
+                'grid-template-columns:repeat(8,1fr);gap:10px;'
+                'margin-bottom:14px\\">'
+                '<sc-for list=\\"{{ deu.kpis }}\\" as=\\"k\\" '
+                'hint-placeholder-count=\\"8\\">'
+                '<div style=\\"' + card.replace('padding:14px 16px',
+                                                'padding:10px 12px')
+                + '\\"><div style=\\"font:600 8.5px/1 var(--sans);'
+                'letter-spacing:.1em;text-transform:uppercase;'
+                'color:var(--ink3)\\">{{ k.label }}' + TD +
+                '<div style=\\"font:600 15px/1.3 var(--mono);'
+                'color:var(--ink);margin-top:4px\\">{{ k.value }}' + TD + TD
+                + '<\\u002Fsc-for>' + TD)
+
+    def tarjeta_estrategia():
+        return ('<sc-for list=\\"{{ deu.estrategias }}\\" as=\\"g\\" '
+                'hint-placeholder-count=\\"6\\">'
+                '<div style=\\"display:flex;gap:10px;padding:9px 10px;'
+                'margin-bottom:7px;background:var(--surf2);'
+                'border-radius:5px;border-left:3px solid {{ g.color }}\\">'
+                '<div style=\\"color:{{ g.color }};font-size:12px\\">'
+                '{{ g.icon }}' + TD +
+                '<div><div style=\\"font:600 11.5px/1.35 var(--sans);'
+                'color:var(--ink)\\">{{ g.titulo }}' + TD +
+                '<div style=\\"font:400 10.5px/1.5 var(--sans);'
+                'color:var(--ink2);margin-top:2px\\">{{ g.detalle }}'
+                + TD + TD + TD + '<\\u002Fsc-for>')
+
+    # ============ SECCION 1: MERCADO ============
+    sec_mercado = (
+        '<!-- ================= RF MERCADO ================= -->\\n'
+        '      <sc-if value=\\"{{ isDeudaMdo }}\\" '
+        'hint-placeholder-val=\\"{{ false }}\\">\\n      '
+        + kpis_strip() + '\\n'
         '      <div style=\\"' + card + ';margin-bottom:14px\\">'
         '<div style=\\"' + header + '\\">Curvas de rendimiento · UDI '
         '{{ deu.udiF }}<span style=\\"font-weight:500;text-transform:none;'
-        'letter-spacing:0\\"> · {{ deu.fwdTxt }}' + '<\\u002Fspan>' + TD +
+        'letter-spacing:0\\"> · {{ deu.fwdTxt }}<\\u002Fspan>' + TD +
         '<svg viewBox=\\"0 0 980 380\\" style=\\"width:100%;height:auto\\">'
         '<sc-for list=\\"{{ deu.curva.gMen }}\\" as=\\"g\\" '
         'hint-placeholder-count=\\"7\\">'
@@ -1858,27 +2009,103 @@ def _seccion_deuda(html: str, deu: dict) -> str:
         + chip('var(--pos)', 'Udibonos (real) / nodo barato')
         + chip('var(--neg)', 'nodo caro') + TD +
         '<div style=\\"' + nota + '\\">{{ deu.notaCurva }}' + TD + TD + '\\n'
-        # ---- estrategias | valor relativo ----
+        # sobretasas | historico
+        '      <div style=\\"display:grid;grid-template-columns:1fr 1fr;'
+        'gap:14px;margin-bottom:14px\\">\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Sobretasas BONDES F por plazo'
+        + TD +
+        '<sc-for list=\\"{{ deu.stBuckets }}\\" as=\\"b\\" '
+        'hint-placeholder-count=\\"6\\">'
+        '<div data-tip=\\"{{ b.tip }}\\" style=\\"display:flex;'
+        'align-items:center;gap:10px;margin-bottom:9.5px\\">'
+        '<div style=\\"width:52px;font-family:var(--mono);font-size:10.5px;'
+        'color:var(--ink2)\\">{{ b.eti }}' + TD +
+        '<div style=\\"flex:1;height:13px;background:var(--surf3);'
+        'border-radius:3px;overflow:hidden\\">'
+        '<div style=\\"height:100%;width:{{ b.w }}%;'
+        'background:var(--brand-lite);border-radius:3px\\">' + TD + TD +
+        '<div style=\\"width:56px;text-align:right;'
+        'font-family:var(--mono);font-size:10.5px;color:var(--ink)\\">'
+        '{{ b.stF }}' + TD + TD + '<\\u002Fsc-for>'
+        '<div style=\\"' + nota + '\\">{{ deu.notaSt }}' + TD + TD + '\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Histórico de la curva '
+        '<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\">· {{ deu.histN }} sesión(es)<\\u002Fspan>'
+        + TD +
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Métrica<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Hoy<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Percentil<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Rango hist.<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.histRows }}\\" as=\\"h\\" '
+        'hint-placeholder-count=\\"6\\">'
+        '<sc-raw-tr style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:6px 9px;font-size:10.5px;'
+        'color:var(--ink2)\\">{{ h.eti }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--ink)\\">{{ h.hoyF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ h.pctF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink3)\\">'
+        '{{ h.rangoF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>'
+        '<div style=\\"' + nota + '\\">{{ deu.histNota }}' + TD + TD + TD
+        + '\\n'
+        # niveles
+        '      <div style=\\"' + card.replace('padding:14px 16px',
+                                              'padding:0;overflow:hidden')
+        + '\\">'
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Bono M<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Vencimiento'
+        '<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Años<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">YTM<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Duración<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Convexidad<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.niveles }}\\" as=\\"f\\" '
+        'hint-placeholder-count=\\"18\\">'
+        '<sc-raw-tr style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:6px 9px;font:600 10.5px var(--mono);'
+        'color:var(--ink)\\">{{ f.serie }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"padding:6px 9px;font-family:var(--mono);'
+        'color:var(--ink2)\\">{{ f.venc }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.aniosF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--ink)\\">{{ f.ytmF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.durF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.convF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
+        '      <\\u002Fsc-if>\\n\\n      ')
+
+    # ============ SECCION 2: ANALISIS ============
+    sec_analisis = (
+        '<!-- ================= RF ANALISIS ================= -->\\n'
+        '      <sc-if value=\\"{{ isDeudaAna }}\\" '
+        'hint-placeholder-val=\\"{{ false }}\\">\\n'
         '      <div style=\\"display:grid;grid-template-columns:1.3fr 1fr;'
         'gap:14px;margin-bottom:14px\\">\\n'
         '        <div style=\\"' + card + '\\">'
-        '<div style=\\"' + header + '\\">Estrategias de la mesa' + TD +
-        '<sc-for list=\\"{{ deu.estrategias }}\\" as=\\"g\\" '
-        'hint-placeholder-count=\\"6\\">'
-        '<div style=\\"display:flex;gap:10px;padding:9px 10px;'
-        'margin-bottom:7px;background:var(--surf2);border-radius:5px;'
-        'border-left:3px solid {{ g.color }}\\">'
-        '<div style=\\"color:{{ g.color }};font-size:12px\\">{{ g.icon }}'
-        + TD + '<div><div style=\\"font:600 11.5px/1.35 var(--sans);'
-        'color:var(--ink)\\">{{ g.titulo }}' + TD +
-        '<div style=\\"font:400 10.5px/1.5 var(--sans);color:var(--ink2);'
-        'margin-top:2px\\">{{ g.detalle }}' + TD + TD + TD +
-        '<\\u002Fsc-for>'
-        '<div style=\\"' + nota + '\\">{{ deu.notaMetodo }}' + TD + TD + '\\n'
+        '<div style=\\"' + header + '\\">Estrategias de la mesa' + TD
+        + tarjeta_estrategia() +
+        '<div style=\\"' + nota + '\\">{{ deu.notaAutoria }}' + TD + TD
+        + '\\n'
         '        <div style=\\"' + card + '\\">'
         '<div style=\\"' + header + '\\">Valor relativo por bono'
         '<span style=\\"font-weight:500;text-transform:none;'
-        'letter-spacing:0\\"> · residuo vs curva' + '<\\u002Fspan>' + TD +
+        'letter-spacing:0\\"> · residuo vs curva<\\u002Fspan>' + TD +
         '<sc-for list=\\"{{ deu.richCheap }}\\" as=\\"b\\" '
         'hint-placeholder-count=\\"18\\">'
         '<div data-tip=\\"{{ b.tip }}\\" style=\\"display:flex;'
@@ -1892,23 +2119,21 @@ def _seccion_deuda(html: str, deu: dict) -> str:
         '<div style=\\"width:1px;height:13px;background:var(--border2)\\">'
         + TD + '<div style=\\"width:50%\\">'
         '<div style=\\"height:9px;width:{{ b.wpos }}%;'
-        'background:var(--pos);border-radius:0 2px 2px 0\\">' + TD + TD + TD +
-        '<div style=\\"width:52px;text-align:right;'
+        'background:var(--pos);border-radius:0 2px 2px 0\\">' + TD + TD + TD
+        + '<div style=\\"width:52px;text-align:right;'
         'font-family:var(--mono);font-size:10px;color:{{ b.color }}\\">'
         '{{ b.valF }}' + TD + TD + '<\\u002Fsc-for>'
         '<div style=\\"' + nota + '\\">{{ deu.notaRichCheap }}' + TD + TD +
         TD + '\\n'
-        # ---- matriz de escenarios ----
+        # matriz
         '      <div style=\\"' + card + ';margin-bottom:14px\\">'
         '<div style=\\"' + header + '\\">Retorno total a 12 meses por '
         'escenario<span style=\\"font-weight:500;text-transform:none;'
         'letter-spacing:0\\"> · verde gana al CETE 1a '
-        '({{ deu.escenarios.refF }})' + '<\\u002Fspan>' + TD +
+        '({{ deu.escenarios.refF }})<\\u002Fspan>' + TD +
         '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
         'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
-        '<sc-raw-th style=\\"' + th.replace('text-align:right',
-                                            'text-align:left')
-        + '\\">Bono M<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Bono M<\\u002Fsc-raw-th>'
         '<sc-raw-th style=\\"' + th + '\\">Años<\\u002Fsc-raw-th>'
         '<sc-for list=\\"{{ deu.escenarios.cols }}\\" as=\\"c\\" '
         'hint-placeholder-count=\\"5\\">'
@@ -1932,18 +2157,45 @@ def _seccion_deuda(html: str, deu: dict) -> str:
         '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>'
         '<div style=\\"' + nota + '\\">{{ deu.notaEscenarios }}' + TD + TD
         + '\\n'
-        # ---- tabla carry+roll ----
-        '      <div style=\\"' + card.replace('padding:14px 16px',
-                                              'padding:0;overflow:hidden')
+        # fijo vs flotante | carry
+        '      <div style=\\"display:grid;grid-template-columns:1fr 1.5fr;'
+        'gap:14px\\">\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Fijo vs flotante'
+        '<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\"> · breakeven de fondeo<\\u002Fspan>' + TD +
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Plazo<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Fijo (M)<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Sobretasa<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Fondeo BE<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Alza req.<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.fvfRows }}\\" as=\\"f\\" '
+        'hint-placeholder-count=\\"5\\">'
+        '<sc-raw-tr data-tip=\\"{{ f.tip }}\\" '
+        'style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:6px 9px;font-family:var(--mono);'
+        'color:var(--ink)\\">{{ f.plazoF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ f.fijoF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.stF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.beF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:700;'
+        'color:{{ f.alzaC }}\\">{{ f.alzaF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>'
+        '<div style=\\"' + nota + '\\">{{ deu.notaFvf }}' + TD + TD + '\\n'
+        '        <div style=\\"' + card.replace('padding:14px 16px',
+                                                'padding:0;overflow:hidden')
         + '\\">'
         '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
         'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
-        '<sc-raw-th style=\\"' + th.replace('text-align:right',
-                                            'text-align:left')
-        + '\\">Bono M<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Bono M<\\u002Fsc-raw-th>'
         '<sc-raw-th style=\\"' + th + '\\">Años<\\u002Fsc-raw-th>'
-        '<sc-raw-th style=\\"' + th + '\\">Cupón<\\u002Fsc-raw-th>'
-        '<sc-raw-th style=\\"' + th + '\\">Precio<\\u002Fsc-raw-th>'
         '<sc-raw-th style=\\"' + th + '\\">YTM<\\u002Fsc-raw-th>'
         '<sc-raw-th style=\\"' + th + '\\">Dur.<\\u002Fsc-raw-th>'
         '<sc-raw-th style=\\"' + th + '\\">Residuo<\\u002Fsc-raw-th>'
@@ -1951,23 +2203,19 @@ def _seccion_deuda(html: str, deu: dict) -> str:
         '<sc-raw-th style=\\"' + th + '\\">Roll 3m<\\u002Fsc-raw-th>'
         '<sc-raw-th style=\\"' + th + '\\">Total pb<\\u002Fsc-raw-th>'
         '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
-        '<sc-for list=\\"{{ deu.filas }}\\" as=\\"f\\" '
+        '<sc-for list=\\"{{ deu.filasCarry }}\\" as=\\"f\\" '
         'hint-placeholder-count=\\"18\\">'
         '<sc-raw-tr data-tip=\\"{{ f.tip }}\\" '
         'style-hover=\\"background:var(--surf2)\\" '
         'style=\\"border-top:1px solid var(--border)\\">'
         '<sc-raw-td style=\\"padding:6px 9px;font:600 10.5px var(--mono);'
         'color:var(--ink)\\">{{ f.marca }}{{ f.serie }}<\\u002Fsc-raw-td>'
-        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.aniosF }}'
-        '<\\u002Fsc-raw-td>'
-        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.cupF }}'
-        '<\\u002Fsc-raw-td>'
-        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.pF }}'
-        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.aniosF }}<\\u002Fsc-raw-td>'
         '<sc-raw-td style=\\"' + td + ';font-weight:600;'
         'color:var(--ink)\\">{{ f.ytmF }}<\\u002Fsc-raw-td>'
-        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.durF }}'
-        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
+        '{{ f.durF }}<\\u002Fsc-raw-td>'
         '<sc-raw-td style=\\"' + td + ';font-weight:600;'
         'color:{{ f.resC }}\\">{{ f.resF }}<\\u002Fsc-raw-td>'
         '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">'
@@ -1977,12 +2225,87 @@ def _seccion_deuda(html: str, deu: dict) -> str:
         '<sc-raw-td style=\\"' + td + ';font-weight:700;'
         'color:{{ f.totC }}\\">{{ f.totF }}<\\u002Fsc-raw-td>'
         '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + TD + '\\n'
+        '      <\\u002Fsc-if>\\n\\n      ')
+
+    # ============ SECCION 3: VALUACION ============
+    sec_valuacion = (
+        '<!-- ================= RF VALUACION ================= -->\\n'
+        '      <sc-if value=\\"{{ isDeudaVal }}\\" '
+        'hint-placeholder-val=\\"{{ false }}\\">\\n'
+        '      <div style=\\"display:grid;grid-template-columns:1fr 1fr;'
+        'gap:14px;margin-bottom:14px\\">\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Verificación de valuación'
+        '<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\"> · vector del {{ deu.fechaF }} · UDI '
+        '{{ deu.udiF }}<\\u002Fspan>' + TD +
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Clase<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Títulos<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Convención'
+        '<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Desv. máx.<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.valRows }}\\" as=\\"v\\" '
+        'hint-placeholder-count=\\"4\\">'
+        '<sc-raw-tr style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:7px 9px;font:600 10.5px var(--mono);'
+        'color:var(--ink)\\">{{ v.clase }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ v.n }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"padding:7px 9px;font-size:10px;'
+        'color:var(--ink2)\\">{{ v.met }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--pos)\\">{{ v.difF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
         '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Convenciones y método' + TD +
+        '<div style=\\"font:400 11px/1.65 var(--sans);'
+        'color:var(--ink2)\\">{{ deu.convenciones }}' + TD + TD + TD + '\\n'
+        # credito corporativo
+        '      <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Crédito corporativo · sobretasa '
+        'mediana por calificación y plazo'
+        '<span style=\\"font-weight:500;text-transform:none;'
+        'letter-spacing:0\\"> · pickup {{ deu.credPick }}<\\u002Fspan>'
+        + TD +
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th_izq + '\\">Calificación'
+        '<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Títulos<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">0–1a<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">1–3a<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">3–5a<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">5a+<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.credRows }}\\" as=\\"c\\" '
+        'hint-placeholder-count=\\"4\\">'
+        '<sc-raw-tr style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:7px 9px;font:700 11px var(--mono);'
+        'color:var(--ink)\\">{{ c.rating }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink3)\\">{{ c.nF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ c.p01 }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ c.p13 }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ c.p35 }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink)\\">'
+        '{{ c.p5m }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>'
+        '<div style=\\"' + nota + '\\">{{ deu.credNota }}' + TD + TD + '\\n'
         '      <\\u002Fsc-if>\\n\\n      ')
 
     html = _sub(html,
         '<!-- ================= CONFIGURACIÓN ================= -->',
-        seccion + '<!-- ================= CONFIGURACIÓN ================= -->')
+        sec_mercado + sec_analisis + sec_valuacion
+        + '<!-- ================= CONFIGURACIÓN ================= -->')
     return html
 
 
