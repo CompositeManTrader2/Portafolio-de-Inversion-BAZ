@@ -2528,16 +2528,35 @@ def _cartera_rf() -> dict | None:
 
     total = float(cart["valor"].sum())
     dv01_tot = float(cart["dv01"].sum())
-    dur_pond = float((cart["DURACION"] * cart["valor"]).sum() / total)
-    carry_anual = float((cart["ytm"] * cart["valor"]).sum() / total)
+    bonos_ = cart[~cart["es_repo"] & cart["encontrado"]]
+    val_bonos = float(bonos_["valor"].sum()) or 1.0
+    repo_val = float(cart.loc[cart["es_repo"], "valor"].sum())
+    dur_pond = float((bonos_["DURACION"].fillna(0.0)
+                      * bonos_["valor"]).sum() / val_bonos)
+    carry_anual = float((bonos_["ytm"].fillna(0.0)
+                         * bonos_["valor"]).sum() / val_bonos)
     pnl = float(cart["pnl"].sum())
+    v_cust = cart.dropna(subset=["dif_custodio_pct"])
+    dif_max = (float(v_cust["dif_custodio_pct"].abs().max())
+               if len(v_cust) else None)
+    dif_prom = (float(v_cust["dif_custodio_pct"].abs().mean())
+                if len(v_cust) else None)
     hist = bn.historico_metricas()
     te = dpo.te_ex_ante(hist)
 
     filas = []
     for r in cart.itertuples():
         ok = bool(r.encontrado)
+        emisora = str(getattr(r, "emisora", "") or "")
+        gob = str(r.tipo_valor) in ("BI", "M", "S", "LF", "LD")
+        if bool(r.es_repo):
+            eti = f"REPORTO {emisora} {r.serie}"
+        elif gob:
+            eti = f"{r.tipo_valor} {r.serie}"
+        else:
+            eti = f"{r.tipo_valor} {emisora} {r.serie}"
         filas.append(dict(
+            eti=eti,
             clase=str(r.tipo_valor), serie=str(r.serie),
             titF=f"{r.titulos:,.0f}",
             costoF=f"{r.costo_unit:,.3f}" if ok else "—",
@@ -2549,10 +2568,15 @@ def _cartera_rf() -> dict | None:
             pesoF=f"{r.peso_pct:.1f} %" if ok else "—",
             pnlF=f"{r.pnl:+,.0f}" if ok else "—",
             pnlC=("var(--pos)" if ok and r.pnl >= 0 else "var(--neg)"),
-            tip=(f"{r.tipo_valor} {r.serie}|{r.titulos:,.0f} títulos · "
-                 f"valor {r.valor:,.0f}|DV01 {r.dv01:,.0f} MXN/pb · "
-                 f"dur {r.DURACION:.2f}" if ok else
-                 f"{r.tipo_valor} {r.serie}|No está en el vector vigente")))
+            tip=((f"{eti}|{r.titulos:,.0f} títulos"
+                  + (f" (+{r.por_liquidar:,.0f} por liquidar)"
+                     if r.por_liquidar else "")
+                  + f" · valor {r.valor:,.0f}"
+                  + (f"|DV01 {r.dv01:,.0f} MXN/pb · dur {r.DURACION:.2f}"
+                     if not r.es_repo else "|Reporto: colateral a mercado, sin DV01")
+                  + (f"|vs custodio {r.dif_custodio_pct:+.2f} %"
+                     if r.dif_custodio_pct == r.dif_custodio_pct else ""))
+                 if ok else f"{eti}|No está en el vector vigente")))
 
     pos = dpo.posicionamiento_krd(dv, cart)
     max_k = float(max(pos["port_pct"].max(), pos["bench_pct"].max())) or 1.0
@@ -2603,9 +2627,16 @@ def _cartera_rf() -> dict | None:
             f"cartera replicante reparte la inversión en Udibonos que "
             f"igualaría las KRD del pasivo (mínimos cuadrados, sin cortos).")
 
+    ten_m = {str(r.serie): float(r.titulos)
+             for r in cart.itertuples() if str(r.tipo_valor) == "M"}
     ests = dpo.estructuras_dv01(dv)
     est_rows = []
     for e in ests:
+        en_libro = [f"{p['serie']}: {ten_m[p['serie']]:,.0f} tít. en libro"
+                    for p in e["patas"]
+                    if p["sentido"] == "Venta" and p["serie"] in ten_m]
+        if en_libro:
+            e["senal"] += " · " + " · ".join(en_libro)
         patas = [dict(sentido=p["sentido"], serie=p["serie"],
                       titF=f"{p['titulos']:,.0f}",
                       ytmF=f"{p['ytm']:.2f} %",
@@ -2625,10 +2656,11 @@ def _cartera_rf() -> dict | None:
     return dict(
         kpis=[
             dict(label="Valor cartera RF", value=f"${total/1e6:,.1f} M"),
+            dict(label="Reporto", value=f"${repo_val/1e6:,.1f} M"),
             dict(label="DV01 total", value=f"{dv01_tot:,.0f} MXN/pb"),
-            dict(label="Duración", value=f"{dur_pond:.2f}"),
+            dict(label="Duración (bonos)", value=f"{dur_pond:.2f}"),
             dict(label="Carry anual est.", value=f"{carry_anual:.2f} %"),
-            dict(label="P&L vs costo", value=f"{pnl:+,.0f}"),
+            dict(label="P&L vs costo", value=f"${pnl/1e6:+,.1f} M"),
             dict(label="TE ex-ante",
                  value=(f"{te:.0f} pb" if te is not None
                         else f"— ({len(hist)} ses.)")),
@@ -2641,12 +2673,18 @@ def _cartera_rf() -> dict | None:
                  "posición, contra el benchmark gubernamental de Bonos M "
                  "ponderado por monto en circulación del vector. La barra "
                  "morada es el portafolio; la gris, el benchmark."),
-        notaCartera=("Cartera registrada en data/posiciones_deuda.csv "
-                     "(boletas C/V neteadas con costo promedio) y valuada "
-                     "con el PRECIO SUCIO oficial del vector vigente. El "
-                     "TE ex-ante se activa al acumular 20 sesiones de "
-                     "vectores. Análisis de mesa; no constituye una "
-                     "recomendación de inversión."),
+        notaCartera=(("Posición cargada de data/Pos*.xlsx (se convierte "
+                      "sola al registro de boletas) y valuada con el "
+                      "PRECIO SUCIO oficial del vector vigente; los "
+                      "títulos por liquidar (24-96h) se suman a la "
+                      "exposición económica. "
+                      + (f"Validación contra el Valor Mercado del "
+                         f"custodio: {len(v_cust)} posiciones, desviación "
+                         f"promedio {dif_prom:.2f} % y máxima "
+                         f"{dif_max:.2f} %. " if dif_max is not None else "")
+                      + "El TE ex-ante se activa al acumular 20 sesiones "
+                      "de vectores. Análisis de mesa; no constituye una "
+                      "recomendación de inversión.")),
     )
 
 
@@ -2690,9 +2728,9 @@ def _seccion_cartera(html: str, pc: dict) -> str:
         'hint-placeholder-val=\\"{{ false }}\\">\\n'
         # KPIs
         '      <div style=\\"display:grid;'
-        'grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px\\">'
+        'grid-template-columns:repeat(7,1fr);gap:10px;margin-bottom:14px\\">'
         '<sc-for list=\\"{{ pcart.kpis }}\\" as=\\"k\\" '
-        'hint-placeholder-count=\\"6\\">'
+        'hint-placeholder-count=\\"7\\">'
         '<div style=\\"' + card.replace('padding:14px 16px',
                                         'padding:10px 12px') + '\\">'
         '<div style=\\"font:600 8.5px/1 var(--sans);letter-spacing:.1em;'
@@ -2724,7 +2762,7 @@ def _seccion_cartera(html: str, pc: dict) -> str:
         'style-hover=\\"background:var(--surf2)\\" '
         'style=\\"border-top:1px solid var(--border)\\">'
         '<sc-raw-td style=\\"padding:6px 9px;font:600 10.5px var(--mono);'
-        'color:var(--ink)\\">{{ f.clase }} {{ f.serie }}<\\u002Fsc-raw-td>'
+        'color:var(--ink)\\">{{ f.eti }}<\\u002Fsc-raw-td>'
         '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.titF }}'
         '<\\u002Fsc-raw-td>'
         '<sc-raw-td style=\\"' + td + ';color:var(--ink3)\\">'

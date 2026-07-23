@@ -47,14 +47,67 @@ CUBETAS = (2.0, 5.0, 10.0, 20.0, 30.0)
 # 1. Posiciones
 # --------------------------------------------------------------------------
 
+def _pos_xlsx_reciente() -> Path | None:
+    candidatos = list((RAIZ / "data").glob("Pos*.xlsx"))
+    return max(candidatos, key=lambda x: x.stat().st_mtime) if candidatos else None
+
+
+def convertir_posicion(ruta_xlsx: Path) -> pd.DataFrame:
+    """
+    Convierte el estado de posicion de la mesa (formato Pos.xlsx: Operacion,
+    Ticker TIPO_EMISORA_SERIE, No. Titulos, Valor Costo Actualizado, Valor
+    Mercado, Posicion 24/48/73/96) al registro canonico de boletas. Guarda:
+      - costo unitario = Valor Costo Actualizado / titulos (los papeles en
+        UDIs ya vienen actualizados por el custodio)
+      - vm_ref = Valor Mercado del custodio, para validar nuestra valuacion
+      - por_liquidar = neto de las posiciones a 24/48/72/96 horas
+      - clase_op = Bono | Repo (el reporto se trata como liquidez colateral,
+        sin DV01)
+    """
+    df = pd.read_excel(ruta_xlsx)
+    filas = []
+    for r in df.itertuples():
+        partes = str(r.Ticker).strip().split("_")
+        if len(partes) != 3:
+            continue
+        tv, emisora, serie = (x.strip() for x in partes)
+        titulos = float(r._4)          # No. Titulos
+        costo = float(r._6)            # Valor Costo Actualizado
+        vm = float(r._7)               # Valor Mercado
+        por_liq = sum(float(x) for x in (r._12, r._13, r._14, r._15))
+        clase_op = str(r.Operacion).strip()
+        precio = (costo / titulos) if (titulos and clase_op != "Repo") else (
+            vm / titulos if titulos else 0.0)
+        filas.append(dict(
+            fecha="", operacion="C", tipo_valor=tv, emisora=emisora,
+            serie=serie, titulos=titulos, precio_sucio=precio,
+            por_liquidar=por_liq, vm_ref=vm, clase_op=clase_op))
+    out = pd.DataFrame(filas)
+    out.to_csv(CSV_POSICIONES, index=False)
+    return out
+
+
 def cargar_posiciones() -> pd.DataFrame:
-    """Boletas netas por instrumento con costo promedio ponderado."""
+    """Boletas netas por instrumento con costo promedio ponderado. Si hay
+    un data/Pos*.xlsx mas nuevo que el CSV, se convierte automaticamente."""
+    px = _pos_xlsx_reciente()
+    if px is not None and (not CSV_POSICIONES.exists()
+                           or px.stat().st_mtime
+                           > CSV_POSICIONES.stat().st_mtime):
+        convertir_posicion(px)
     if not CSV_POSICIONES.exists():
         return pd.DataFrame()
     b = pd.read_csv(CSV_POSICIONES, dtype={"serie": str})
     b["operacion"] = b["operacion"].astype(str).str.upper().str.strip()
+    if "emisora" not in b.columns:      # compatibilidad con el esquema previo
+        b["emisora"] = ""
+    for c, d in (("por_liquidar", 0.0), ("vm_ref", float("nan")),
+                 ("clase_op", "Bono")):
+        if c not in b.columns:
+            b[c] = d
     netas = []
-    for (tv, serie), g in b.groupby(["tipo_valor", "serie"], sort=False):
+    for (tv, emi, serie), g in b.groupby(
+            ["tipo_valor", "emisora", "serie"], sort=False, dropna=False):
         titulos = costo = 0.0
         for r in g.itertuples():
             q = float(r.titulos)
@@ -66,42 +119,75 @@ def cargar_posiciones() -> pd.DataFrame:
                     costo *= max(titulos - q, 0.0) / titulos
                 titulos -= q
         if abs(titulos) > 1e-9:
-            netas.append(dict(tipo_valor=str(tv).strip(), serie=str(serie),
-                              titulos=titulos, costo_total=costo,
-                              costo_unit=costo / titulos))
+            netas.append(dict(
+                tipo_valor=str(tv).strip(), emisora=str(emi).strip(),
+                serie=str(serie), titulos=titulos, costo_total=costo,
+                costo_unit=costo / titulos,
+                por_liquidar=float(g["por_liquidar"].sum()),
+                vm_ref=float(g["vm_ref"].sum()),
+                clase_op=str(g["clase_op"].iloc[0])))
     return pd.DataFrame(netas)
 
 
 def _universo(dv: dict) -> pd.DataFrame:
-    """Todos los gubernamentales del vector con ytm/dur y precio sucio."""
+    """Gubernamentales del vector + corporativos destilados, valuables."""
     bloques = []
     for clase, df in (("BI", dv["cetes"]), ("M", dv["bonos_m"]),
                       ("S", dv["udibonos"]), ("LF", dv["bondesf"])):
         d = df.copy()
         d["clase"] = clase
         bloques.append(d)
+    corp = bn.cargar_corp()
+    if corp is not None and len(corp):
+        c = corp.copy()
+        c["clase"] = c["TIPO VALOR"]
+        fecha = pd.Timestamp(dv["fecha"])
+        c["anios"] = ((pd.to_datetime(c["FECHA VCTO"], errors="coerce")
+                       - fecha).dt.days / 365.0).clip(lower=0.0)
+        bloques.append(c)
     u = pd.concat(bloques, ignore_index=True)
     u["serie"] = u["SERIE"].astype(str).str.strip()
+    u["emisora_v"] = u["EMISORA"].astype(str).str.strip()
     u["sucio"] = pd.to_numeric(u["PRECIO SUCIO"], errors="coerce")
-    return u
+    u["DURACION"] = pd.to_numeric(u["DURACION"], errors="coerce")
+    return u.drop_duplicates(subset=["clase", "emisora_v", "serie"],
+                             keep="first")
 
 
 def valuar_cartera(dv: dict) -> pd.DataFrame:
-    """Posiciones valuadas contra el vector, con DV01 monetario."""
+    """
+    Posiciones valuadas contra el vector con DV01 monetario. Los titulos
+    por liquidar se suman a la exposicion economica. El reporto se valua al
+    precio de registro (colateral a mercado) con DV01 cero. La columna
+    dif_custodio_pct compara nuestra valuacion contra el Valor Mercado del
+    estado del custodio cuando este viene en el registro.
+    """
     pos = cargar_posiciones()
     if not len(pos):
         return pd.DataFrame()
     u = _universo(dv)
     m = pos.merge(
-        u[["clase", "serie", "anios", "ytm", "DURACION", "CONVEXIDAD",
-           "sucio", "FECHA VCTO"]],
-        left_on=["tipo_valor", "serie"], right_on=["clase", "serie"],
+        u[["clase", "emisora_v", "serie", "anios", "ytm", "DURACION",
+           "CONVEXIDAD", "sucio", "FECHA VCTO"]],
+        left_on=["tipo_valor", "emisora", "serie"],
+        right_on=["clase", "emisora_v", "serie"],
         how="left")
-    m["encontrado"] = m["sucio"].notna()
-    m["valor"] = m["titulos"] * m["sucio"]
-    m["pnl"] = m["valor"] - m["costo_total"]
-    m["dv01"] = (pd.to_numeric(m["DURACION"], errors="coerce")
-                 * m["valor"] * 1e-4)
+    es_repo = m["clase_op"].astype(str).str.upper().str.startswith("REPO")
+    m["encontrado"] = m["sucio"].notna() | es_repo
+    m["titulos_econ"] = m["titulos"] + m["por_liquidar"].fillna(0.0)
+    m["valor"] = np.where(es_repo,
+                          m["titulos"] * m["costo_unit"],
+                          m["titulos_econ"] * m["sucio"])
+    m["pnl"] = np.where(es_repo, 0.0, m["valor"] - m["costo_total"])
+    m["dv01"] = np.where(
+        es_repo, 0.0,
+        pd.to_numeric(m["DURACION"], errors="coerce").fillna(0.0)
+        * m["valor"] * 1e-4)
+    m["es_repo"] = es_repo
+    m["dif_custodio_pct"] = np.where(
+        m["vm_ref"].notna() & (m["vm_ref"] != 0) & ~es_repo,
+        (m["titulos"] * m["sucio"] / m["vm_ref"] - 1.0) * 100.0,
+        float("nan"))
     total = m["valor"].sum()
     m["peso_pct"] = np.where(total > 0, m["valor"] / total * 100.0, 0.0)
     return m

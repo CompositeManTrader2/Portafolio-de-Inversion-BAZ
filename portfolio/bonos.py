@@ -44,6 +44,10 @@ COLUMNAS = ["FECHA", "TIPO VALOR", "EMISORA", "SERIE", "PRECIO LIMPIO",
 GUBERNAMENTALES = ("BI", "M", "S", "LF", "LD")
 CSV_GOB = RAIZ / "data" / "vector_gob.csv"
 CSV_CRED = RAIZ / "data" / "vector_credito.csv"
+CSV_CORP = RAIZ / "data" / "vector_corp.csv"
+
+# tipos de valor corporativos que la cartera puede tener en posicion
+TIPOS_CORP_POS = ("90", "91", "93", "94", "95")
 DIR_HIST = RAIZ / "data" / "hist_gob"
 
 # corporativos de tasa revisable para las curvas de credito
@@ -68,6 +72,12 @@ def _leer_xls(ruta: str, mtime: float) -> pd.DataFrame:
     motor = "xlrd" if ruta.lower().endswith(".xls") else "openpyxl"
     df = pd.read_excel(ruta, engine=motor, usecols=COLUMNAS)
     df["TIPO VALOR"] = df["TIPO VALOR"].astype(str).str.strip()
+    # persistir el universo corporativo valuable (para posiciones propias)
+    corp = df[df["TIPO VALOR"].isin(TIPOS_CORP_POS)]
+    try:
+        corp.to_csv(CSV_CORP, index=False)
+    except OSError:
+        pass
     return df[df["TIPO VALOR"].isin(GUBERNAMENTALES)].reset_index(drop=True)
 
 
@@ -130,6 +140,17 @@ def _ytm_bono(sucio: float, cupon: float, n: int, f: float,
     return (lo + hi) / 2.0
 
 
+def cargar_corp() -> pd.DataFrame | None:
+    """Universo corporativo destilado (tipos 90/91/93/94/95) para valuar
+    posiciones propias; None si aun no se destila de un vector."""
+    if not CSV_CORP.exists():
+        return None
+    df = _leer_csv(str(CSV_CORP), CSV_CORP.stat().st_mtime)
+    df["oficial"] = pd.to_numeric(df["TASA DE RENDIMIENTO"], errors="coerce")
+    df["ytm"] = df["oficial"]
+    return df
+
+
 def cargar(ruta: Path | None = None) -> dict | None:
     df = _obtener_gubernamentales(ruta)
     if df is None or not len(df):
@@ -146,7 +167,7 @@ def _procesar(df: pd.DataFrame) -> dict:
     # ---- CETES -----------------------------------------------------------
     bi = df[df["TIPO VALOR"] == "BI"].copy()
     bi["dias"] = bi["FECHA VCTO"].map(_dias)
-    bi = bi[bi["dias"] > 3].sort_values("dias")
+    bi = bi[bi["dias"] > 0].sort_values("dias")
     bi["anios"] = bi["dias"] / 365.0
     bi["ytm_solver"] = (10.0 / bi["PRECIO LIMPIO"] - 1.0) * 360.0 / bi["dias"] * 100.0
     bi["oficial"] = pd.to_numeric(bi["TASA DE RENDIMIENTO"], errors="coerce")
