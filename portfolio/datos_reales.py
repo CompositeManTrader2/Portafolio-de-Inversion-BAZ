@@ -640,6 +640,11 @@ def inyectar(html: str, d: dict) -> str:
     # --- 7a. pestana de rotacion sectorial --------------------------------
     html = _seccion_rotacion(html, _rotacion(d))
 
+    # --- 7a2. pestana de deuda gubernamental (vector Valmer) --------------
+    deu = _deuda()
+    if deu is not None:
+        html = _seccion_deuda(html, deu)
+
     # --- 7b. riesgo explicativo (antes de la capa interactiva) ------------
     html = _riesgo_explicativo(html)
 
@@ -1453,6 +1458,350 @@ def _seccion_rotacion(html: str, rot: dict) -> str:
         '{{ f.sug }}' + TS + '<\\u002Fsc-raw-td>'
         '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
         '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + '\\n'
+        '      <\\u002Fsc-if>\\n\\n      ')
+
+    html = _sub(html,
+        '<!-- ================= CONFIGURACIÓN ================= -->',
+        seccion + '<!-- ================= CONFIGURACIÓN ================= -->')
+    return html
+
+
+# --------------------------------------------------------------------------
+# Deuda gubernamental: curvas del vector Valmer y estrategias de mesa
+# --------------------------------------------------------------------------
+# La pestana lee el vector analitico del dia (data/Vector*.xls), calcula las
+# curvas de CETES, Bonos M (nominal) y Udibonos (real) con las convenciones
+# del mercado, y genera estrategias cuantificadas: extension corta contra
+# CETES (el clasico "la curva empinada paga extender"), carry + rolldown por
+# nodo, mariposa 2s5s10s, breakevens contra el objetivo de Banxico y la
+# sobretasa de Bondes F como alternativa de liquidez. Analisis de mesa, no
+# recomendacion de inversion; la pestana lo declara.
+
+from . import bonos as bn
+
+
+def _deuda() -> dict | None:
+    dv = bn.cargar()
+    if dv is None:
+        return None
+    a = bn.analitica(dv)
+    cr = bn.carry_rolldown(dv)
+    fondeo = float(cr["fondeo"].iloc[0])
+
+    # ---- curva SVG (escala raiz para abrir el tramo corto) ---------------
+    W_, H_, mL, mR, mT, mB = 980.0, 300.0, 46.0, 16.0, 14.0, 30.0
+    t_max = float(dv["bonos_m"]["anios"].max()) * 1.03
+    y_lo = float(dv["udibonos"]["ytm"].min()) - 0.4
+    y_hi = float(dv["bonos_m"]["ytm"].max()) + 0.4
+
+    def X(t):
+        return mL + (t / t_max) ** 0.5 * (W_ - mL - mR)
+
+    def Y(y):
+        return mT + (y_hi - y) / (y_hi - y_lo) * (H_ - mT - mB)
+
+    def linea(df_):
+        return " ".join(f"{X(t):.1f},{Y(y):.1f}"
+                        for t, y in zip(df_["anios"], df_["ytm"]))
+
+    def nodos(df_, color, nombre, plantilla):
+        out = []
+        for serie, anios, ytm, vcto, precio, cupon, dur in zip(
+                df_["SERIE"], df_["anios"], df_["ytm"], df_["FECHA VCTO"],
+                df_["PRECIO LIMPIO"], df_["TASA CUPON"], df_["DURACION"]):
+            extra = plantilla.format(p=precio, c=cupon, d=dur)
+            out.append(dict(
+                cx=f"{X(anios):.1f}", cy=f"{Y(ytm):.1f}", color=color,
+                tip=(f"{nombre} {serie}|Vence "
+                     f"{pd.Timestamp(vcto).date()} ({anios:.2f}a)"
+                     f"|Tasa {ytm:.2f} %{extra}")))
+        return out
+
+    puntos = (
+        nodos(dv["cetes"], "var(--warn)", "CETE", "|Precio {p:.5f}") +
+        nodos(dv["bonos_m"], "var(--brand-lite)", "BONO M",
+              "|Cupón {c:.2f} % · P {p:.3f}|Duración {d:.2f}") +
+        nodos(dv["udibonos"], "var(--pos)", "UDIBONO",
+              "|Tasa real · Cupón {c:.2f} %"))
+
+    ticks_x = [dict(x=f"{X(t):.1f}", label=lab)
+               for t, lab in [(0.083, "1m"), (0.25, "3m"), (1, "1a"),
+                              (2, "2a"), (5, "5a"), (10, "10a"),
+                              (20, "20a"), (29, "30a")] if t <= t_max]
+    ticks_y = [dict(y=f"{Y(v):.1f}", label=f"{v:.0f}%")
+               for v in np.arange(np.ceil(y_lo), y_hi, 1.0)]
+
+    curva = dict(
+        lineaM=linea(dv["bonos_m"]), lineaC=linea(dv["cetes"]),
+        lineaS=linea(dv["udibonos"]), puntos=puntos,
+        ticksX=ticks_x, ticksY=ticks_y)
+
+    # ---- tabla de nodos M con carry + rolldown ---------------------------
+    mejor_total = cr.loc[cr["total_bp"].idxmax()]
+    cr = cr.assign(por_dur=cr["total_bp"] / cr["anios"].clip(lower=0.3))
+    m_df = dv["bonos_m"].reset_index(drop=True)
+    filas = []
+    for i, r in enumerate(cr.itertuples()):
+        b = m_df.iloc[i]
+        dulce = r.serie == str(mejor_total["serie"])
+        filas.append(dict(
+            serie=r.serie, venc=f"{pd.Timestamp(b['FECHA VCTO']).date()}",
+            aniosF=f"{r.anios:.2f}", cupF=f"{b['TASA CUPON']:.2f}",
+            pF=f"{b['PRECIO LIMPIO']:.3f}", ytmF=f"{r.ytm:.2f} %",
+            durF=f"{b['DURACION']:.2f}",
+            vsF=f"{(r.ytm - fondeo) * 100:+.0f}",
+            carryF=f"{r.carry_bp:+.0f}", rollF=f"{r.roll_bp:+.0f}",
+            totF=f"{r.total_bp:+.0f}",
+            totC=("var(--pos)" if r.total_bp > 0 else "var(--neg)"),
+            marca=("★ " if dulce else ""),
+            tip=(f"BONO M {r.serie}|YTM {r.ytm:.2f} % · duración "
+                 f"{b['DURACION']:.2f}|Carry 3m {r.carry_bp:+.0f} pb · "
+                 f"rolldown {r.roll_bp:+.0f} pb|Total {r.total_bp:+.0f} pb "
+                 f"({r.por_dur:.0f} pb por año de plazo)")))
+
+    # ---- estrategias cuantificadas ---------------------------------------
+    n2 = a["nodo_m2"]
+    pickup = a["ext_corta"]
+    be_sube = pickup / max(float(n2["DURACION"]) - 1.0, 0.3)
+    mejor_aj = cr.loc[cr["por_dur"].idxmax()]
+    fly = a["fly_2_5_10"]
+
+    estrategias = [
+        dict(icon="▲", color="var(--pos)",
+             titulo=f"Extensión corta: CETE 1a → BONO M {n2['SERIE']}",
+             detalle=(f"El M de {n2['anios']:.1f}a paga {a['nodo_m2']['ytm']:.2f} % "
+                      f"contra {a['cete364']:.2f} % del CETE de 1a: "
+                      f"{pickup:+.0f} pb de pickup con duración "
+                      f"{n2['DURACION']:.1f}. El trade pierde contra el CETE "
+                      f"sólo si la tasa del M sube más de ~{be_sube:.0f} pb "
+                      f"en el año.")),
+        dict(icon="▲", color="var(--brand-lite)",
+             titulo=f"La pendiente paga: 2s10s en {a['p2s10']:+.0f} pb",
+             detalle=(f"Con fondeo en {fondeo:.2f} % y el M10 en "
+                      f"{a['m10']:.2f} %, cada año de duración añade "
+                      f"~{a['p2s10'] / 8:.0f} pb de tasa. El carry favorece "
+                      f"recibir la parte media-larga; el riesgo es un "
+                      f"re-empinamiento adicional (10s30s ya sólo "
+                      f"{a['p10s30']:+.0f} pb).")),
+        dict(icon="★", color="var(--pos)",
+             titulo=(f"Punto dulce de carry + rolldown: "
+                     f"{mejor_total['serie']}"),
+             detalle=(f"A 3 meses, el {mejor_total['serie']} "
+                      f"({mejor_total['anios']:.1f}a) genera "
+                      f"{mejor_total['total_bp']:+.0f} pb entre carry y "
+                      f"rolldown. Ajustado por plazo, el mejor es el "
+                      f"{mejor_aj['serie']} ({mejor_aj['anios']:.1f}a) con "
+                      f"{mejor_aj['por_dur']:.0f} pb por año de plazo: más "
+                      f"devengo por unidad de riesgo.")),
+        dict(icon="◆", color="var(--warn)",
+             titulo=f"Mariposa 2s5s10s: panza {'barata' if fly > 15 else 'cara' if fly < -15 else 'en línea'} ({fly:+.0f} pb)",
+             detalle=(f"2·M5 − M2 − M10 = {fly:+.0f} pb. "
+                      + ("La panza (5a) rinde de más contra las alas: "
+                         "comprar 5a financiado con 2a y 10a captura la "
+                         "normalización sin apostar dirección."
+                         if fly > 15 else
+                         "La panza está cara contra las alas; favorece "
+                         "barbell (2a + 10a) sobre bullet de 5a."
+                         if fly < -15 else
+                         "Sin señal relevante en la panza hoy."))),
+        dict(icon="✎", color="var(--warn)",
+             titulo=(f"Breakevens {a['be3']:.1f} % (3a) y {a['be10']:.1f} % "
+                     f"(10a) vs objetivo de 3 %"),
+             detalle=(f"El mercado paga inflación implícita muy por arriba "
+                      f"del objetivo de Banxico (3 % ± 1). El nominal gana "
+                      f"al udibono salvo que esperes inflación promedio "
+                      f"mayor a {a['be10']:.1f} % por 10 años; con ese "
+                      f"listón, los M lucen mejor que los S como expresión "
+                      f"de duración.")),
+        dict(icon="•", color="var(--ink2)",
+             titulo=(f"Liquidez: BONDES F a fondeo "
+                     f"+{a['sobretasa_lf']:.0f} pb"),
+             detalle=(f"Para la caja del mandato, el flotante paga TIIE de "
+                      f"fondeo más {a['sobretasa_lf']:.0f} pb de sobretasa "
+                      f"sin riesgo de duración; domina al CETE de 28d "
+                      f"({a['cete28']:.2f} %) en escenarios de pausa o alza "
+                      f"y sólo pierde ante recortes rápidos.")),
+    ]
+
+    return dict(
+        fechaF=f"{dv['fecha'].day} {MES_UI[dv['fecha'].month]} {dv['fecha'].year}",
+        udiF=f"{dv['udi']:.4f}",
+        kpis=[
+            dict(label="CETE 28d", value=f"{a['cete28']:.2f} %"),
+            dict(label="CETE 1a", value=f"{a['cete364']:.2f} %"),
+            dict(label="BONO M 2a", value=f"{a['m2']:.2f} %"),
+            dict(label="BONO M 10a", value=f"{a['m10']:.2f} %"),
+            dict(label="2s10s", value=f"{a['p2s10']:+.0f} pb"),
+            dict(label="10s30s", value=f"{a['p10s30']:+.0f} pb"),
+            dict(label="BE 10a", value=f"{a['be10']:.2f} %"),
+            dict(label="Fondeo (91d)", value=f"{fondeo:.2f} %"),
+        ],
+        curva=curva, filas=filas, estrategias=estrategias,
+        notaCurva=("Nominal (CETES + Bonos M) y real (Udibonos) del vector "
+                   "Valmer del día; escala de plazo en raíz para abrir el "
+                   "tramo corto. Pasa el cursor por cada nodo."),
+        notaMetodo=("Tasas calculadas del precio del vector con las "
+                    "convenciones del mercado: descuento 360 para CETES y "
+                    "cupón semestral 182/360 resuelto por bisección para M "
+                    "y Udibonos (tasa real vía UDI implícita en el interés "
+                    "acumulado). Carry a 3m fondeado al CETE de 91d; "
+                    "rolldown con curva sin cambios. Análisis de mesa; no "
+                    "constituye una recomendación de inversión."),
+    )
+
+
+def _seccion_deuda(html: str, deu: dict) -> str:
+    # ---- navegacion, titulos y bandera -----------------------------------
+    html = _sub(html,
+        "['rotacion','Rotación','09'],['configuracion','Configuración','10']",
+        "['rotacion','Rotación','09'],['deuda','Deuda','10'],"
+        "['configuracion','Configuración','11']")
+    html = _sub(html,
+        "configuracion: ['Configuración', 'Fuentes de datos",
+        "deuda: ['Deuda gubernamental', 'Vector Valmer del " + deu["fechaF"]
+        + " · curvas, carry y estrategias'], "
+        "configuracion: ['Configuración', 'Fuentes de datos")
+    html = _sub(html,
+        "isRotacion: this.state.tab === 'rotacion', rot: ",
+        "isDeuda: this.state.tab === 'deuda', deu: " + js(deu)
+        + ", isRotacion: this.state.tab === 'rotacion', rot: ")
+
+    # ---- seccion del template -------------------------------------------
+    TD = '<\\u002Fdiv>'
+    card = ('background:var(--surf);border:1px solid var(--border);'
+            'border-radius:6px;padding:14px 16px')
+    header = ('font:700 10px/1 var(--sans);letter-spacing:.14em;'
+              'text-transform:uppercase;color:var(--ink3);margin-bottom:12px')
+    nota = ('font:400 10.5px/1.55 var(--sans);color:var(--ink3);'
+            'margin-top:10px;border-top:1px dashed var(--border);'
+            'padding-top:8px')
+    th = ('text-align:right;font:700 9px/1 var(--sans);'
+          'letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);'
+          'padding:9px 10px')
+    td = 'padding:6px 10px;text-align:right;font-family:var(--mono)'
+
+    def chip(color, texto):
+        return ('<span style=\\"display:inline-flex;align-items:center;'
+                'gap:5px\\"><span style=\\"width:9px;height:9px;'
+                'border-radius:2px;background:' + color
+                + ';display:inline-block\\"><\\u002Fspan>' + texto
+                + '<\\u002Fspan>')
+
+    seccion = (
+        '<!-- ================= DEUDA ================= -->\\n'
+        '      <sc-if value=\\"{{ isDeuda }}\\" '
+        'hint-placeholder-val=\\"{{ false }}\\">\\n'
+        # ---- KPIs ----
+        '      <div style=\\"display:grid;'
+        'grid-template-columns:repeat(8,1fr);gap:10px;margin-bottom:14px\\">'
+        '<sc-for list=\\"{{ deu.kpis }}\\" as=\\"k\\" '
+        'hint-placeholder-count=\\"8\\">'
+        '<div style=\\"' + card.replace('padding:14px 16px',
+                                        'padding:10px 12px') + '\\">'
+        '<div style=\\"font:600 8.5px/1 var(--sans);letter-spacing:.1em;'
+        'text-transform:uppercase;color:var(--ink3)\\">{{ k.label }}' + TD +
+        '<div style=\\"font:600 15px/1.3 var(--mono);color:var(--ink);'
+        'margin-top:4px\\">{{ k.value }}' + TD + TD + '<\\u002Fsc-for>' + TD
+        + '\\n'
+        # ---- curva ----
+        '      <div style=\\"' + card + ';margin-bottom:14px\\">'
+        '<div style=\\"' + header + '\\">Curvas de rendimiento · UDI '
+        '{{ deu.udiF }}' + TD +
+        '<svg viewBox=\\"0 0 980 300\\" style=\\"width:100%;height:auto\\">'
+        '<sc-for list=\\"{{ deu.curva.ticksY }}\\" as=\\"ty\\" '
+        'hint-placeholder-count=\\"7\\">'
+        '<line x1=\\"46\\" y1=\\"{{ ty.y }}\\" x2=\\"964\\" '
+        'y2=\\"{{ ty.y }}\\" stroke=\\"var(--border)\\" '
+        'stroke-dasharray=\\"2 4\\"><\\u002Fline>'
+        '<text x=\\"8\\" y=\\"{{ ty.y }}\\" font-family=\\"var(--mono)\\" '
+        'font-size=\\"9\\" fill=\\"var(--ink3)\\">{{ ty.label }}'
+        '<\\u002Ftext><\\u002Fsc-for>'
+        '<sc-for list=\\"{{ deu.curva.ticksX }}\\" as=\\"tx\\" '
+        'hint-placeholder-count=\\"8\\">'
+        '<text x=\\"{{ tx.x }}\\" y=\\"296\\" text-anchor=\\"middle\\" '
+        'font-family=\\"var(--mono)\\" font-size=\\"9\\" '
+        'fill=\\"var(--ink3)\\">{{ tx.label }}<\\u002Ftext><\\u002Fsc-for>'
+        '<polyline points=\\"{{ deu.curva.lineaC }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--warn)\\" stroke-width=\\"1.8\\"><\\u002Fpolyline>'
+        '<polyline points=\\"{{ deu.curva.lineaM }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--brand-lite)\\" stroke-width=\\"2.2\\">'
+        '<\\u002Fpolyline>'
+        '<polyline points=\\"{{ deu.curva.lineaS }}\\" fill=\\"none\\" '
+        'stroke=\\"var(--pos)\\" stroke-width=\\"1.8\\"><\\u002Fpolyline>'
+        '<sc-for list=\\"{{ deu.curva.puntos }}\\" as=\\"p\\" '
+        'hint-placeholder-count=\\"30\\">'
+        '<circle data-tip=\\"{{ p.tip }}\\" cx=\\"{{ p.cx }}\\" '
+        'cy=\\"{{ p.cy }}\\" r=\\"3.4\\" fill=\\"{{ p.color }}\\" '
+        'stroke=\\"var(--surf)\\" stroke-width=\\"1.2\\"><\\u002Fcircle>'
+        '<\\u002Fsc-for><\\u002Fsvg>'
+        '<div style=\\"display:flex;gap:14px;margin-top:8px;'
+        'font-family:var(--mono);font-size:10px\\">'
+        + chip('var(--brand-lite)', 'Bonos M (nominal)')
+        + chip('var(--warn)', 'CETES')
+        + chip('var(--pos)', 'Udibonos (real)') + TD +
+        '<div style=\\"' + nota + '\\">{{ deu.notaCurva }}' + TD + TD + '\\n'
+        # ---- estrategias + tabla ----
+        '      <div style=\\"display:grid;grid-template-columns:1fr 1.35fr;'
+        'gap:14px\\">\\n'
+        '        <div style=\\"' + card + '\\">'
+        '<div style=\\"' + header + '\\">Estrategias de la mesa' + TD +
+        '<sc-for list=\\"{{ deu.estrategias }}\\" as=\\"g\\" '
+        'hint-placeholder-count=\\"6\\">'
+        '<div style=\\"display:flex;gap:10px;padding:9px 10px;'
+        'margin-bottom:7px;background:var(--surf2);border-radius:5px;'
+        'border-left:3px solid {{ g.color }}\\">'
+        '<div style=\\"color:{{ g.color }};font-size:12px\\">{{ g.icon }}'
+        + TD + '<div><div style=\\"font:600 11.5px/1.35 var(--sans);'
+        'color:var(--ink)\\">{{ g.titulo }}' + TD +
+        '<div style=\\"font:400 10.5px/1.5 var(--sans);color:var(--ink2);'
+        'margin-top:2px\\">{{ g.detalle }}' + TD + TD + TD +
+        '<\\u002Fsc-for>'
+        '<div style=\\"' + nota + '\\">{{ deu.notaMetodo }}' + TD + TD + '\\n'
+        '        <div style=\\"' + card.replace('padding:14px 16px',
+                                                'padding:0;overflow:hidden')
+        + '\\">'
+        '<sc-raw-table style=\\"width:100%;border-collapse:collapse;'
+        'font-size:10.5px\\"><sc-raw-thead><sc-raw-tr>'
+        '<sc-raw-th style=\\"' + th.replace('text-align:right',
+                                            'text-align:left')
+        + '\\">Bono M<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Años<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Cupón<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Precio<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">YTM<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Dur.<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">vs fondeo<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Carry 3m<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Roll 3m<\\u002Fsc-raw-th>'
+        '<sc-raw-th style=\\"' + th + '\\">Total pb<\\u002Fsc-raw-th>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-raw-thead><sc-raw-tbody>'
+        '<sc-for list=\\"{{ deu.filas }}\\" as=\\"f\\" '
+        'hint-placeholder-count=\\"18\\">'
+        '<sc-raw-tr data-tip=\\"{{ f.tip }}\\" '
+        'style-hover=\\"background:var(--surf2)\\" '
+        'style=\\"border-top:1px solid var(--border)\\">'
+        '<sc-raw-td style=\\"padding:6px 10px;font:600 10.5px var(--mono);'
+        'color:var(--ink)\\">{{ f.marca }}{{ f.serie }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.aniosF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.cupF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.pF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:600;'
+        'color:var(--ink)\\">{{ f.ytmF }}<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.durF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.vsF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.carryF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';color:var(--ink2)\\">{{ f.rollF }}'
+        '<\\u002Fsc-raw-td>'
+        '<sc-raw-td style=\\"' + td + ';font-weight:700;'
+        'color:{{ f.totC }}\\">{{ f.totF }}<\\u002Fsc-raw-td>'
+        '<\\u002Fsc-raw-tr><\\u002Fsc-for>'
+        '<\\u002Fsc-raw-tbody><\\u002Fsc-raw-table>' + TD + TD + '\\n'
         '      <\\u002Fsc-if>\\n\\n      ')
 
     html = _sub(html,
