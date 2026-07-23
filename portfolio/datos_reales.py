@@ -1623,6 +1623,41 @@ def _deuda() -> dict | None:
                       f"y sólo pierde ante recortes rápidos.")),
     ]
 
+    # --- analisis autorado de la mesa (Claude Code) -----------------------
+    # El analisis de estrategias vive fuera de la app: se autora por sesion
+    # en data/analisis_deuda.json y aqui solo se despliega, con autoria y
+    # fecha. Las reglas de arriba quedan como respaldo cuando no hay
+    # analisis para el vector vigente.
+    autoria = ""
+    ruta_analisis = DATOS / "analisis_deuda.json"
+    if ruta_analisis.exists():
+        import json
+        try:
+            aut = json.loads(ruta_analisis.read_text(encoding="utf-8"))
+        except Exception:
+            aut = None
+        if aut and str(aut.get("fecha_vector")) == dv["fecha"].isoformat():
+            tesis = [dict(icon="◎", color="var(--brand-lite)",
+                          titulo=f"Tesis del día — {aut.get('autor', 'mesa')}",
+                          detalle=str(aut.get("tesis", "")))]
+            estrategias = tesis + [
+                dict(icon=e.get("icon", "•"),
+                     color=e.get("color", "var(--ink2)"),
+                     titulo=str(e.get("titulo", "")),
+                     detalle=str(e.get("detalle", "")))
+                for e in aut.get("estrategias", [])]
+            autoria = (f"Estrategias del análisis de mesa del "
+                       f"{aut.get('fecha_analisis', '')} "
+                       f"({aut.get('autor', '')}) para este vector. ")
+        else:
+            estrategias.insert(0, dict(
+                icon="✎", color="var(--warn)",
+                titulo="Análisis de mesa pendiente para este vector",
+                detalle=("Las tarjetas siguientes son del motor automático "
+                         "de reglas. Para el análisis autorado del día, "
+                         "corre la sesión de análisis con Claude Code sobre "
+                         "el vector vigente; el resultado se publica aquí.")))
+
     # El vector se publica al cierre: si el cargado no es el mas reciente
     # esperable, la primera tarjeta lo advierte en lugar de dejar que las
     # estrategias pasen por vigentes.
@@ -1654,7 +1689,7 @@ def _deuda() -> dict | None:
         notaCurva=("Nominal (CETES + Bonos M) y real (Udibonos) del vector "
                    "Valmer del día; escala de plazo en raíz para abrir el "
                    "tramo corto. Pasa el cursor por cada nodo."),
-        notaMetodo=("Tasas oficiales del vector (columna TASA DE "
+        notaMetodo=(autoria + "Tasas oficiales del vector (columna TASA DE "
                     "RENDIMIENTO). Verificación de integridad en cada "
                     "carga: un solver propio revalúa cada instrumento desde "
                     "el precio (descuento 360 en CETES; cupón semestral "

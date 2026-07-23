@@ -1,0 +1,50 @@
+{
+  "fecha_vector": "2026-07-22",
+  "fecha_analisis": "2026-07-23",
+  "autor": "Análisis de mesa · Claude Code",
+  "tesis": "Curva nominal muy empinada (2s10s +164 pb) con fondeo anclado: los CETES descuentan a Banxico quieto —el 28d en 6.40 % incluso insinúa un recorte— mientras el forward 1a→2a implícito llega a 9.03 %. Ese colchón de +208 pb sobre el CETE de 1a es la prima por extender: el escenario que castiga la extensión ya está sobrepagado en la curva. La panza de 3–6 años concentra el valor —barata contra la curva ajustada y con el mejor devengo por unidad de plazo—, la parte ultra-larga no compensa (10s30s en solo +45 pb) y los breakevens de inflación (4.0 %–5.1 %) hacen preferible el nominal sobre el udibono salvo como cobertura de cola.",
+  "estrategias": [
+    {
+      "icon": "★",
+      "color": "var(--pos)",
+      "titulo": "Compra núcleo: BONO M 300228 (3.6a, 8.35 %)",
+      "detalle": "Doble señal en el mismo papel: cotiza +16 pb barato contra la curva ajustada y es el mejor carry+rolldown por unidad de plazo de toda la curva (22.5 pb por año a 3 meses; 81 pb totales). Fondeado a 6.51 %, devenga +184 pb sobre el fondeo con duración 3.0. Es el punto dulce para construir la posición de deuda del mandato."
+    },
+    {
+      "icon": "▲",
+      "color": "var(--pos)",
+      "titulo": "Extensión conservadora: CETE 1a → M 280302 / 290301",
+      "detalle": "El 280302 (1.6a) paga +44 pb sobre el CETE de 1a y el 290301 (2.6a) +95 pb. El forward implícito 1a→2a está en 9.03 %: la tasa de 1 año tendría que subir más de 200 pb en doce meses para que quedarse en CETES gane. Para la manga corta del portafolio, el riesgo de extensión está sobrepagado."
+    },
+    {
+      "icon": "⇄",
+      "color": "var(--brand-lite)",
+      "titulo": "Switch de valor relativo: vender 361120, comprar 381118",
+      "detalle": "El 361120 (10.3a, cupón 10 %) cotiza −10 pb caro por efecto cupón y demanda de referencia; el 381118 (12.3a) está en línea con la curva y paga +27 pb más de tasa. El cambio gana tasa y abarata la posición pagando solo ~1 año más de duración, con el mejor carry+roll absoluto de la curva (99 pb a 3m)."
+    },
+    {
+      "icon": "◆",
+      "color": "var(--brand-lite)",
+      "titulo": "Mariposa con carry: panza 3–5a contra 2a y 10a",
+      "detalle": "La mariposa 2s5s10s está en +37 pb con la panza barata por residuos (300228 +16, 320415 +12). Comprar panza financiada con las alas captura la normalización sin apostar dirección y, a diferencia de la mariposa típica, ésta devenga positivo mientras espera."
+    },
+    {
+      "icon": "▼",
+      "color": "var(--warn)",
+      "titulo": "Ultra-largo: sin premio; si se toca, 550429 sobre 471107",
+      "detalle": "Con 10s30s en +45 pb, ir más allá de 10 años añade duración sin premio proporcional. Si el mandato exige duración larga, el 550429 (+8 pb barato) domina al 471107 (−12 pb caro) a duración casi igual (9.8 vs 9.2). El 270603 corto también está caro (−34 pb): evitarlo como parqueo."
+    },
+    {
+      "icon": "✎",
+      "color": "var(--warn)",
+      "titulo": "Udibonos solo como cobertura: breakevens caros",
+      "detalle": "La inflación implícita va de 4.0 % (3a) a 5.1 % (30a), muy por arriba del objetivo: el mercado ya paga una prima de inflación generosa y el nominal domina como expresión de duración. Si se quiere cobertura de cola, el 290830 (3.1a, real 4.09 %) es el único con tasa real corta históricamente alta; los breakevens largos, a 5 %, se venden, no se compran."
+    },
+    {
+      "icon": "•",
+      "color": "var(--ink2)",
+      "titulo": "Caja: BONDES F sobre CETE 28d",
+      "detalle": "El 28d en 6.40 % cotiza por debajo del fondeo (6.51 %): el mercado le pone precio a un recorte cercano. El flotante a fondeo +14 pb de sobretasa protege ese escenario y el contrario; para la liquidez del mandato domina al CETE corto salvo recortes rápidos y profundos."
+    }
+  ]
+}
