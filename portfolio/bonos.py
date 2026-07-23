@@ -42,13 +42,18 @@ COLUMNAS = ["FECHA", "TIPO VALOR", "EMISORA", "SERIE", "PRECIO LIMPIO",
 
 
 def ruta_vector() -> Path | None:
-    candidatos = sorted(RAIZ.glob("data/Vector*.xls*"))
-    return candidatos[-1] if candidatos else None
+    """El vector vigente es el mas reciente por fecha de archivo, de modo
+    que uno subido desde la app releva al que viaja en el repositorio."""
+    candidatos = list(RAIZ.glob("data/Vector*.xls*"))
+    if not candidatos:
+        return None
+    return max(candidatos, key=lambda p: p.stat().st_mtime)
 
 
 @lru_cache(maxsize=2)
 def _leer(ruta: str, mtime: float) -> pd.DataFrame:
-    df = pd.read_excel(ruta, engine="xlrd", usecols=COLUMNAS)
+    motor = "xlrd" if ruta.lower().endswith(".xls") else "openpyxl"
+    df = pd.read_excel(ruta, engine=motor, usecols=COLUMNAS)
     df["TIPO VALOR"] = df["TIPO VALOR"].astype(str).str.strip()
     return df
 

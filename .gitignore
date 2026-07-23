@@ -15,3 +15,6 @@ Thumbs.db
 .idea/
 .vscode/
 .claude/
+
+# Vector Valmer subido desde la app (dato de sesion)
+data/VectorSubido.*

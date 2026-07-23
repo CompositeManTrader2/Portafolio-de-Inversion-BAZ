@@ -1623,6 +1623,20 @@ def _deuda() -> dict | None:
                       f"y sólo pierde ante recortes rápidos.")),
     ]
 
+    # El vector se publica al cierre: si el cargado no es el mas reciente
+    # esperable, la primera tarjeta lo advierte en lugar de dejar que las
+    # estrategias pasen por vigentes.
+    rezago = (date.today() - dv["fecha"]).days
+    if rezago >= 1:
+        estrategias.insert(0, dict(
+            icon="⚠", color="var(--warn)",
+            titulo=(f"Vector del {dv['fecha'].day} "
+                    f"{MES_UI[dv['fecha'].month]} — verifica vigencia"),
+            detalle=(f"Las curvas y estrategias reflejan cierres de hace "
+                     f"{rezago} día(s). Para las cifras del día, sube el "
+                     f"vector con el cargador «Actualizar vector Valmer» "
+                     f"en la parte superior de la app.")))
+
     return dict(
         fechaF=f"{dv['fecha'].day} {MES_UI[dv['fecha'].month]} {dv['fecha'].year}",
         udiF=f"{dv['udi']:.4f}",
