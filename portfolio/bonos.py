@@ -269,3 +269,63 @@ def analitica(d: dict) -> dict:
         be3=(m3 - s3) * 100.0 / 100.0, be10=(m10 - s10) * 100.0 / 100.0,
         sobretasa_lf=float(d["bondesf"]["SOBRETASA"].mean() * 100.0),
     )
+
+
+def residuos_curva(d: dict) -> pd.DataFrame:
+    """
+    Rich/cheap por Bono M: residuo en pb contra una curva suave (polinomio
+    cubico en raiz del plazo). Positivo = barato (rinde de mas), negativo =
+    caro. Es la base del valor relativo intra-curva.
+    """
+    m = d["bonos_m"]
+    x = m["anios"].values.astype(float)
+    y = m["ytm"].values.astype(float)
+    coef = np.polyfit(np.sqrt(x), y, 3)
+    ajuste = np.polyval(coef, np.sqrt(x))
+    return pd.DataFrame(dict(
+        serie=m["SERIE"].astype(str).values, anios=x, ytm=y,
+        residuo_pb=(y - ajuste) * 100.0))
+
+
+def forwards_clave(d: dict) -> list[dict]:
+    """Tasas forward implicitas entre nodos de la curva nominal."""
+    an_, yt_ = curva_nominal(d)
+
+    def z(t):
+        return _interp(an_, yt_, t)
+
+    out = []
+    for t1, t2 in [(1, 2), (2, 3), (2, 5), (5, 10), (10, 20)]:
+        y1, y2 = z(t1) / 100.0, z(t2) / 100.0
+        fwd = ((1 + y2) ** t2 / (1 + y1) ** t1) ** (1 / (t2 - t1)) - 1
+        out.append(dict(t1=t1, t2=t2, spot1=z(t1), spot2=z(t2),
+                        fwd=fwd * 100.0))
+    return out
+
+
+def matriz_escenarios(d: dict, choques_pb=(-100, -50, 0, 50, 100),
+                      horizonte: float = 1.0) -> pd.DataFrame:
+    """
+    Retorno total estimado a 12 meses por Bono M bajo choques paralelos:
+
+      TR% = carry (≈ ytm·h) + rolldown (Δy de rodar por la curva · dur)
+            + precio del choque (−dur·Δy + ½·convexidad·Δy²)
+
+    La referencia de decision es el CETE de 1 año: la matriz responde
+    "¿en qué escenario me gana cada bono contra quedarme en el CETE?".
+    """
+    an_, yt_ = curva_nominal(d)
+    m = d["bonos_m"]
+    filas = []
+    for serie, anios, ytm, dur, conv in zip(
+            m["SERIE"], m["anios"], m["ytm"], m["DURACION"],
+            m["CONVEXIDAD"]):
+        y_roll = _interp(an_, yt_, max(anios - horizonte, 0.02))
+        base = ytm * horizonte + (ytm - y_roll) * dur
+        fila = dict(serie=str(serie), anios=float(anios), ytm=float(ytm))
+        for c in choques_pb:
+            dy = c / 10_000.0
+            precio = (-dur * dy + 0.5 * float(conv) * dy * dy) * 100.0
+            fila[f"tr_{c:+d}"] = base + precio
+        filas.append(fila)
+    return pd.DataFrame(filas)
